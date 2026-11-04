@@ -104,7 +104,7 @@ const CALC = {
     ["drv_is_live_discount", 0, `CASE WHEN ${LD("t")} AND ((t.item_id IS NULL AND ${LIVE_CHECK_OF("check_id")}) OR (t.item_id IS NOT NULL AND ${COUNT_ITEM_OF("item_id")})) THEN 1 ELSE 0 END`],
     ["_chk_seq", 0, `(SELECT ${SEQ("c.check_sequence")} FROM input.in_check c WHERE ${SAME("c", "check_id")})`],
     ["drv_discount", 1, `CASE WHEN t.drv_is_live_discount=1 THEN t.discount_amount ELSE 0 END`],
-    ["drv_discount_order_flag", 1, `CASE WHEN t.drv_is_live_discount=1 AND row_number() OVER (PARTITION BY t.store_location_id, t.order_id, (t.item_id IS NULL), t.discount_name, t.drv_is_live_discount ORDER BY t._chk_seq, ${SEQ("t.source_array_index")}) = 1 THEN 1 ELSE 0 END`],
+    ["drv_discount_order_flag", 1, `CASE WHEN t.drv_is_live_discount=1 AND row_number() OVER (PARTITION BY t.store_location_id, t.order_id, (t.item_id IS NULL), t.discount_name, t.drv_is_live_discount ORDER BY t._chk_seq, ${SEQ("t.source_array_index")}, t.discount_id) = 1 THEN 1 ELSE 0 END`],
   ],
   drv_order: [
     ["drv_order_counted", 0, `CASE WHEN EXISTS (SELECT 1 FROM drv.h_live_order h WHERE ${SAME("h", "order_id")}) AND t.guest_count>=1 THEN 1 ELSE 0 END`],
