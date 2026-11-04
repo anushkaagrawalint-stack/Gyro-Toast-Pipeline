@@ -1,0 +1,2110 @@
+# Phase 2 mapper for the Toast input layer (in_* tables) - normalised.
+# Built from: POS_Input_Derived_Semantic Structure (2).xlsx (sheet 'Input Layer') and
+#             Toast SOR Index (1).xlsx (sheet 'DataDefination'); checked against raw Toast JSON
+#             (orders, labor, cash management, config) in ToastOrders/.
+#
+# HOW A TABLE IS READ
+#   row_path   the arrays to walk from the root record; each element reached is one row.
+#              [] = the root record itself is the row (e.g. one order per line).
+#   rows       used instead of row_path when the same kind of record sits at several places
+#              (taxes, discounts). Each entry has its own path and parents; the parent ids that
+#              are filled show where the row came from (e.g. item_id null = check-level discount).
+#              A path step ending in * is walked recursively to any depth: the same-named array
+#              inside each element is walked too (modifiers inside modifiers, groups inside groups).
+#              A path step ending in {} is a map (object keyed by id) and is walked over its
+#              values, e.g. 'schedules.daySchedules{}'. A dotted step walks through objects.
+#   parents    parent values for the row: a path from the ROOT record, read along the walked path
+#              (e.g. checks.guid = the check that contains this row). <step>.$index and
+#              <step>.$key give the position / map key of an ancestor. Through a * step a path
+#              means the innermost element; a leading ^ means the element one level up (null at the top).
+#   from       a path inside the ROW element (e.g. guid, salesCategory.guid). Special values:
+#                $parent      value comes from `parents` (null when this level has no such parent)
+#                $index       position of the row in its array (0-based)
+#                $value       the element itself (arrays of plain values; map values)
+#                $key         the map key of the row (rows walked from a {} map)
+#                $location    store_location_id = the tenant store name; the loader sets it from the
+#                             GCS location folder (it is not inside the raw record)
+#   type       ID, TEXT, NUMERIC, INT, DATE_INT, BOOLEAN, TIMESTAMP_UTC, JSON_TEXT.
+#   key        Unique key of a row. Always starts with store_location_id: each GCS file holds one
+#              store, and config / menu / stock ids repeat in every store's file.
+#   write_rule only known for in_order (replace_by_order); null elsewhere until decided.
+#
+# Every array is its own table; nothing from the raw JSON is dropped and nothing is invented:
+# the only column not in the raw data is store_location_id (tenant store name).
+# Values are kept exactly as Toast sends them: empty text '' stays '', null stays null, 0 stays 0; nothing is trimmed, blanked or converted to empty.
+# Tables added beyond
+# the Input Layer sheet: in_order_pricing_feature, in_service_charge, in_discount_combo_item, in_config_menu_group_item, in_config_menu_group_modifier_group, in_config_menu_group_subgroup, in_config_menu_group_image, in_config_menu_item_modifier_group, in_config_menu_item_image, in_config_modifier_group_option, in_config_menu_menu_group, in_config_menu_image, in_config_service_charge_tax, in_menus_menu_visibility, in_menus_menu_group_visibility, in_menus_menu_group_tag, in_menus_menu_item_visibility, in_menus_menu_item_tax_rate, in_menus_menu_item_tag, in_menus_menu_item_portion, in_menus_menu_item_modifier_group_ref, in_menus_menu_item_prep_station, in_menus_menu_item_image, in_menus_menu_item_allergen, in_menus_menu_item_payment_assistance, in_menus_menu_item_time_price, in_menus_menu_item_size_sequence_price, in_menus_menu_item_time_price_day, in_menus_menu_item_time_price_range, in_menus_modifier_group_visibility, in_menus_modifier_group_option_ref, in_menus_modifier_option_visibility, in_menus_modifier_option_tax_rate, in_menus_modifier_option_tax_override, in_menus_modifier_option_tag, in_menus_modifier_option_portion, in_menus_modifier_option_modifier_group_ref, in_menus_modifier_option_prep_station, in_menus_modifier_option_allergen, in_menus_pre_modifier_group_refs, in_partner_restaurant_scope, in_partner_connected_restaurant_scope, in_ordering_schedule_override_dining_option, in_ordering_schedule_override_time_range, in_config_discount_promo_code, in_labor_time_entry_break, in_labor_employee_wage_override, in_labor_employee_job.
+
+in_order:
+  source_entity: orders
+  row_path: []   # each line is one record
+  key: [store_location_id, order_id]
+  write_rule: replace_by_order
+  columns:
+    - {from: '$location',                     to: store_location_id,          type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: guid,                            to: order_id,                   type: ID}
+    - {from: entityType,                      to: order_entity_type,          type: TEXT}
+    - {from: externalId,                      to: order_external_id,          type: ID}
+    - {from: displayNumber,                   to: order_display_number,       type: TEXT}
+    - {from: source,                          to: order_source,               type: TEXT}
+    - {from: voidDate,                        to: order_voided_at,            type: TIMESTAMP_UTC}
+    - {from: paidDate,                        to: order_paid_at,              type: TIMESTAMP_UTC}
+    - {from: restaurantService.guid,          to: service_window_id,          type: ID}
+    - {from: restaurantService.entityType,    to: service_window_entity_type, type: TEXT}
+    - {from: restaurantService.externalId,    to: service_window_external_id, type: ID}
+    - {from: voided,                          to: is_order_voided,            type: BOOLEAN}
+    - {from: estimatedFulfillmentDate,        to: estimated_fulfilled_at,     type: TIMESTAMP_UTC}
+    - {from: createdByClientName,             to: created_by_client_name,     type: TEXT}
+    - {from: requiredPrepTime,                to: required_prep_duration,     type: TEXT}
+    - {from: openedDate,                      to: order_opened_at,            type: TIMESTAMP_UTC}
+    - {from: createdDevice.id,                to: created_device_id,          type: ID}
+    - {from: deletedDate,                     to: order_deleted_at,           type: TIMESTAMP_UTC}
+    - {from: modifiedDate,                    to: order_modified_at,          type: TIMESTAMP_UTC}
+    - {from: promisedDate,                    to: order_promised_at,          type: TIMESTAMP_UTC}
+    - {from: server.guid,                     to: server_id,                  type: ID}
+    - {from: server.entityType,               to: server_entity_type,         type: TEXT}
+    - {from: server.externalId,               to: server_external_id,         type: ID}
+    - {from: createdInTestMode,               to: is_order_testmode,          type: BOOLEAN}
+    - {from: lastModifiedDevice.id,           to: last_modified_device_id,    type: ID}
+    - {from: duration,                        to: order_duration_seconds,     type: INT}   # CHECK: Input Layer says NUMERIC, SOR says integer (seconds)
+    - {from: businessDate,                    to: order_business_date,        type: DATE_INT}
+    - {from: excessFood,                      to: is_order_excess_food,       type: BOOLEAN}
+    - {from: table,                           to: order_table_id,             type: JSON_TEXT}   # reference object; always null in the sample, kept whole until its shape is confirmed
+    - {from: approvalStatus,                  to: order_approval_status,      type: TEXT}
+    - {from: deliveryInfo.address1,           to: delivery_address_line_1,    type: TEXT}
+    - {from: deliveryInfo.address2,           to: delivery_address_line_2,    type: TEXT}
+    - {from: deliveryInfo.city,               to: delivery_city,              type: TEXT}
+    - {from: deliveryInfo.administrativeArea, to: delivery_admin_area,        type: TEXT}
+    - {from: deliveryInfo.state,              to: delivery_state,             type: TEXT}
+    - {from: deliveryInfo.zipCode,            to: delivery_zip_code,          type: TEXT}
+    - {from: deliveryInfo.country,            to: delivery_country,           type: TEXT}
+    - {from: deliveryInfo.latitude,           to: delivery_latitude,          type: NUMERIC}
+    - {from: deliveryInfo.longitude,          to: delivery_longitude,         type: NUMERIC}
+    - {from: deliveryInfo.notes,              to: delivery_notes,             type: TEXT}
+    - {from: deliveryInfo.deliveredDate,      to: delivery_completed_at,      type: TIMESTAMP_UTC}
+    - {from: deliveryInfo.dispatchedDate,     to: dispatched_at,              type: TIMESTAMP_UTC}
+    - {from: deliveryInfo.deliveryEmployee,   to: delivery_employee_id,       type: JSON_TEXT}   # reference object; always null in the sample, kept whole until its shape is confirmed
+    - {from: deliveryInfo.deliveryState,      to: delivery_state_status,      type: TEXT}
+    - {from: serviceArea,                     to: service_area_id,            type: JSON_TEXT}   # reference object; always null in the sample, kept whole until its shape is confirmed
+    - {from: curbsidePickupInfo,              to: curbside_pickup_info,       type: JSON_TEXT}
+    - {from: numberOfGuests,                  to: guest_count,                type: INT}
+    - {from: diningOption.guid,               to: dining_option_id,           type: ID}
+    - {from: diningOption.entityType,         to: dining_option_entity_type,  type: TEXT}
+    - {from: diningOption.externalId,         to: dining_option_external_id,  type: ID}
+    - {from: appliedPackagingInfo,            to: applied_packaging_info,     type: JSON_TEXT}
+    - {from: voidBusinessDate,                to: order_void_business_date,   type: DATE_INT}
+    - {from: deleted,                         to: is_order_deleted,           type: BOOLEAN}
+    - {from: createdDate,                     to: order_created_at,           type: TIMESTAMP_UTC}
+    - {from: closedDate,                      to: order_closed_at,            type: TIMESTAMP_UTC}
+    - {from: channelGuid,                     to: channel_id,                 type: ID}
+    - {from: revenueCenter.guid,              to: revenue_center_id,          type: ID}
+    - {from: revenueCenter.entityType,        to: revenue_center_entity_type, type: TEXT}
+    - {from: revenueCenter.externalId,        to: revenue_center_external_id, type: ID}
+
+in_order_pricing_feature:
+  source_entity: orders
+  row_path: [pricingFeatures]
+  parents: {order_id: guid}
+  key: [store_location_id, order_id, pricing_feature]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location', to: store_location_id,  type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: '$parent',   to: order_id,           type: ID}
+    - {from: '$index',    to: source_array_index, type: TEXT}   # position of the row in its array, set by the walker
+    - {from: '$value',    to: pricing_feature,    type: TEXT}   # each array element is a plain string
+
+in_check:
+  source_entity: orders
+  row_path: [checks]
+  parents: {order_id: guid}
+  key: [store_location_id, check_id]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location',                                to: store_location_id,                                 type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: '$parent',                                  to: order_id,                                          type: ID}
+    - {from: '$index',                                   to: check_sequence,                                    type: TEXT}   # position of the row in its array, set by the walker
+    - {from: guid,                                       to: check_id,                                          type: ID}
+    - {from: entityType,                                 to: check_entity_type,                                 type: TEXT}
+    - {from: externalId,                                 to: check_external_id,                                 type: ID}
+    - {from: displayNumber,                              to: check_display_number,                              type: TEXT}
+    - {from: voidDate,                                   to: check_voided_at,                                   type: TIMESTAMP_UTC}
+    - {from: paidDate,                                   to: check_paid_at,                                     type: TIMESTAMP_UTC}
+    - {from: voided,                                     to: is_check_voided,                                   type: BOOLEAN}
+    - {from: createdByClientName,                        to: created_by_client_name,                            type: TEXT}
+    - {from: tabName,                                    to: check_label,                                       type: TEXT}
+    - {from: taxExempt,                                  to: is_check_tax_exempt,                               type: BOOLEAN}
+    - {from: openedDate,                                 to: check_opened_at,                                   type: TIMESTAMP_UTC}
+    - {from: totalAmount,                                to: check_total_amount,                                type: NUMERIC}
+    - {from: createdDevice.id,                           to: created_device_id,                                 type: ID}
+    - {from: deletedDate,                                to: check_deleted_at,                                  type: TIMESTAMP_UTC}
+    - {from: modifiedDate,                               to: check_modified_at,                                 type: TIMESTAMP_UTC}
+    - {from: taxAmount,                                  to: check_tax_amount,                                  type: NUMERIC}
+    - {from: lastModifiedDevice.id,                      to: last_modified_device_id,                           type: ID}
+    - {from: duration,                                   to: check_duration_seconds,                            type: INT}   # CHECK: Input Layer says NUMERIC, SOR says integer (seconds)
+    - {from: splitOrigin,                                to: check_split_origin,                                type: JSON_TEXT}   # reference object; always null in the sample, kept whole until its shape is confirmed
+    - {from: openedBy.guid,                              to: check_opened_by_employee_id,                       type: ID}
+    - {from: paymentStatus,                              to: check_payment_status,                              type: TEXT}
+    - {from: amount,                                     to: check_subtotal_amount,                             type: NUMERIC}
+    - {from: taxExemptionAccount,                        to: tax_exemption_account,                             type: TEXT}
+    - {from: voidBusinessDate,                           to: check_void_business_date/order_void_business_date, type: DATE_INT}   # CHECK: Input Layer gives several names separated by '/'; kept exactly as in the sheet - name to be decided
+    - {from: createdDate,                                to: check_created_at,                                  type: TIMESTAMP_UTC}
+    - {from: deleted,                                    to: is_check_deleted,                                  type: BOOLEAN}
+    - {from: closedDate,                                 to: check_closed_at,                                   type: TIMESTAMP_UTC}
+    - {from: customer.guid,                              to: customer_id,                                       type: ID}
+    - {from: customer.entityType,                        to: customer_entity_type,                              type: TEXT}
+    - {from: customer.firstName,                         to: customer_first_name,                               type: TEXT}
+    - {from: customer.lastName,                          to: customer_last_name,                                type: TEXT}
+    - {from: customer.phoneCountryCode,                  to: customer_phone_country_code,                       type: TEXT}
+    - {from: customer.phone,                             to: customer_phone,                                    type: TEXT}
+    - {from: customer.email,                             to: customer_email,                                    type: TEXT}
+    - {from: appliedLoyaltyInfo.guid,                    to: loyalty_id,                                        type: ID}
+    - {from: appliedLoyaltyInfo.entityType,              to: loyalty_entity_type,                               type: TEXT}
+    - {from: appliedLoyaltyInfo.accrualFamilyGuid,       to: loyalty_accrual_family_id,                         type: ID}
+    - {from: appliedLoyaltyInfo.vendor,                  to: loyalty_vendor,                                    type: TEXT}
+    - {from: appliedLoyaltyInfo.accrualText,             to: loyalty_accrual_text,                              type: TEXT}
+    - {from: appliedLoyaltyInfo.maskedLoyaltyIdentifier, to: loyalty_identifier_masked,                         type: TEXT}
+    - {from: appliedLoyaltyInfo.loyaltyIdentifier,       to: loyalty_identifier_raw,                            type: TEXT}
+
+in_service_charge:
+  source_entity: orders
+  row_path: [checks, appliedServiceCharges]
+  parents: {order_id: guid, check_id: checks.guid}
+  key: [store_location_id, check_service_charge_id]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location',                                to: store_location_id,                             type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: '$parent',                                  to: order_id,                                      type: ID}
+    - {from: '$parent',                                  to: check_id,                                      type: ID}
+    - {from: '$index',                                   to: source_array_index,                            type: TEXT}   # position of the row in its array, set by the walker
+    - {from: guid,                                       to: check_service_charge_id,                       type: ID}
+    - {from: entityType,                                 to: check_service_charge_entity_type,              type: TEXT}
+    - {from: externalId,                                 to: check_service_charge_external_id,              type: ID}
+    - {from: delivery,                                   to: check_service_charge_applies_to_delivery,      type: BOOLEAN}
+    - {from: taxable,                                    to: is_check_service_charge_taxable,               type: BOOLEAN}
+    - {from: serviceChargeCalculation,                   to: check_service_charge_calculation,              type: TEXT}
+    - {from: paymentGuid,                                to: check_service_charge_payment_id,               type: ID}
+    - {from: chargeType,                                 to: check_service_charge_type,                     type: TEXT}
+    - {from: destination,                                to: check_service_charge_destination,              type: TEXT}
+    - {from: gratuity,                                   to: is_check_service_charge_gratuity,              type: BOOLEAN}
+    - {from: takeout,                                    to: is_check_service_charge_applies_to_takeout,    type: BOOLEAN}
+    - {from: serviceChargeCategory,                      to: check_service_charge_category,                 type: TEXT}
+    - {from: serviceCharge.guid,                         to: service_charge_id,                             type: ID}
+    - {from: serviceCharge.entityType,                   to: service_charge_entity_type,                    type: TEXT}
+    - {from: serviceCharge.externalId,                   to: service_charge_external_id,                    type: ID}
+    - {from: name,                                       to: service_charge_name,                           type: TEXT}
+    - {from: chargeAmount,                               to: service_charge_amount,                         type: NUMERIC}
+    - {from: dineIn,                                     to: is_service_charge_applies_to_dine_in,          type: BOOLEAN}
+    - {from: refundDetails.refundAmount,                 to: service_charge_refund_amount,                  type: NUMERIC}
+    - {from: refundDetails.taxRefundAmount,              to: service_charge_refund_tax_amount,              type: NUMERIC}
+    - {from: refundDetails.refundTransaction.guid,       to: service_charge_refund_transaction_id,          type: ID}
+    - {from: refundDetails.refundTransaction.entityType, to: service_charge_refund_transaction_entity_type, type: TEXT}
+
+in_items:
+  source_entity: orders
+  row_path: [checks, selections]
+  parents: {order_id: guid, check_id: checks.guid}
+  key: [store_location_id, item_id]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location',                                to: store_location_id,                                                                           type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: '$parent',                                  to: order_id,                                                                                    type: ID}
+    - {from: '$index',                                   to: source_array_index,                                                                          type: TEXT}   # position of the row in its array, set by the walker
+    - {from: '$parent',                                  to: check_id,                                                                                    type: ID}
+    - {from: guid,                                       to: item_id,                                                                                     type: ID}
+    - {from: entityType,                                 to: item_entity_type,                                                                            type: TEXT}
+    - {from: externalId,                                 to: item_external_id,                                                                            type: ID}
+    - {from: voidDate,                                   to: item_void_at,                                                                                type: TIMESTAMP_UTC}
+    - {from: fulfillmentStatus,                          to: item_fulfillment_status,                                                                     type: TEXT}
+    - {from: optionGroupPricingMode,                     to: item_modifier_group_pricing_mode,                                                            type: TEXT}
+    - {from: selectionType,                              to: item_type,                                                                                   type: TEXT}
+    - {from: price,                                      to: item_unit_price,                                                                             type: NUMERIC}
+    - {from: voided,                                     to: is_item_voided,                                                                              type: BOOLEAN}
+    - {from: createdByClientName,                        to: item_created_by_client_name,                                                                 type: TEXT}
+    - {from: storedValueTransactionId,                   to: stored_value_transaction_id/gift_card_transaction_id,                                        type: ID}   # CHECK: Input Layer gives several names separated by '/'; kept exactly as in the sheet - name to be decided
+    - {from: unitOfMeasure,                              to: item_unit_of_measure,                                                                        type: TEXT}
+    - {from: salesCategoryPlu,                           to: item_sales_category_price_lookup_code,                                                       type: TEXT}
+    - {from: toastGiftCard,                              to: is_item_gift_card,                                                                           type: JSON_TEXT}   # raw is an object (toastGiftCard), not a boolean; kept whole
+    - {from: tax,                                        to: item_tax_amount,                                                                             type: NUMERIC}
+    - {from: modifiedDate,                               to: item_modified_at,                                                                            type: TIMESTAMP_UTC}
+    - {from: deferred,                                   to: item_is_deferred,                                                                            type: BOOLEAN}
+    - {from: preDiscountPrice,                           to: item_price_before_discount,                                                                  type: NUMERIC}
+    - {from: optionGroup,                                to: item_modifier_group,                                                                         type: JSON_TEXT}   # reference object; always null in the sample, kept whole until its shape is confirmed
+    - {from: displayName,                                to: item_name,                                                                                   type: TEXT}
+    - {from: seatNumber,                                 to: seat_number,                                                                                 type: INT}
+    - {from: giftCardSelectionInfo,                      to: item_gift_card_details,                                                                      type: JSON_TEXT}
+    - {from: taxInclusion,                               to: is_item_tax_included,                                                                        type: TEXT}
+    - {from: quantity,                                   to: item_quantity,                                                                               type: NUMERIC}
+    - {from: receiptLinePrice,                           to: item_receipt_amount,                                                                         type: NUMERIC}
+    - {from: diningOption.guid,                          to: dining_option_id,                                                                            type: ID}
+    - {from: diningOption.entityType,                    to: dining_option_entity_type,                                                                   type: TEXT}
+    - {from: diningOption.externalId,                    to: dining_option_external_id,                                                                   type: ID}
+    - {from: premodifierPlu,                             to: premodifier_price_lookup_code,                                                               type: TEXT}
+    - {from: voidBusinessDate,                           to: item_void_business_date/check_void_business_date/order_void_business_date,                   type: DATE_INT}   # CHECK: Input Layer gives several names separated by '/'; kept exactly as in the sheet - name to be decided
+    - {from: createdDate,                                to: item_created_at,                                                                             type: TIMESTAMP_UTC}
+    - {from: preModifier,                                to: pre_modifier,                                                                                type: JSON_TEXT}   # reference object; always null in the sample, kept whole until its shape is confirmed
+    - {from: plu,                                        to: price_lookup_code,                                                                           type: TEXT}
+    - {from: fulfillment,                                to: items_fulfilled_at,                                                                          type: JSON_TEXT}   # raw is an object (Fulfillment), not a timestamp; kept whole
+    - {from: salesCategory.guid,                         to: sales_category_id,                                                                           type: ID}
+    - {from: salesCategory.entityType,                   to: sales_category_entity_type,                                                                  type: TEXT}
+    - {from: salesCategory.externalId,                   to: sales_category_external_id,                                                                  type: ID}
+    - {from: salesCategory.multiLocationId,              to: sales_category_multi_location_id,                                                            type: TEXT}
+    - {from: itemGroup.guid,                             to: menu_group_id / menu_section_id/menu_category_id,                                            type: ID}   # CHECK: Input Layer gives several names separated by '/'; kept exactly as in the sheet - name to be decided
+    - {from: itemGroup.entityType,                       to: menu_group_entity_type/menu_section_entity_type/menu_category_entity_type,                   type: TEXT}   # CHECK: Input Layer gives several names separated by '/'; kept exactly as in the sheet - name to be decided
+    - {from: itemGroup.externalId,                       to: menu_group_external_id/menu_section_external_id/menu_category_external_id,                   type: ID}   # CHECK: Input Layer gives several names separated by '/'; kept exactly as in the sheet - name to be decided
+    - {from: itemGroup.multiLocationId,                  to: menu_group_multi_location_id/menu_category_multi_location_id/menu_section_multi_location_id, type: TEXT}   # CHECK: Input Layer gives several names separated by '/'; kept exactly as in the sheet - name to be decided
+    - {from: item.guid,                                  to: menu_item_id,                                                                                type: ID}
+    - {from: item.entityType,                            to: menu_item_entity_type,                                                                       type: TEXT}
+    - {from: item.externalId,                            to: menu_item_external_id,                                                                       type: ID}
+    - {from: item.multiLocationId,                       to: menu_item_multi_location_id,                                                                 type: TEXT}
+    - {from: voidReason.guid,                            to: item_void_reason_id,                                                                         type: ID}
+    - {from: voidReason.entityType,                      to: item_void_reason_entity_type,                                                                type: TEXT}
+    - {from: voidReason.externalId,                      to: item_void_reason_external_id,                                                                type: ID}
+    - {from: splitOrigin.guid,                           to: item_split_origin_id,                                                                        type: ID}
+    - {from: splitOrigin.entityType,                     to: item_split_origin_entity_type,                                                               type: TEXT}
+    - {from: splitOrigin.externalId,                     to: item_split_origin_external_id,                                                               type: ID}
+    - {from: refundDetails.refundAmount,                 to: items_refund_amount,                                                                         type: NUMERIC}
+    - {from: refundDetails.taxRefundAmount,              to: items_refund_tax_amount,                                                                     type: NUMERIC}
+    - {from: refundDetails.refundTransaction.guid,       to: item_refund_transaction_id,                                                                  type: ID}
+    - {from: refundDetails.refundTransaction.entityType, to: item_refund_transaction_entity_type,                                                         type: TEXT}
+
+in_modifier:
+  source_entity: orders
+  row_path: [checks, selections, 'modifiers*']
+  parents: {order_id: guid, check_id: checks.guid, item_id: checks.selections.guid, nested_in_modifier_id: ^checks.selections.modifiers.guid}
+  key: [store_location_id, modifier_id]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location',                                to: store_location_id,                                                                                     type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: '$parent',                                  to: order_id,                                                                                              type: ID}
+    - {from: '$index',                                   to: source_array_index,                                                                                    type: TEXT}   # position of the row in its array, set by the walker
+    - {from: '$parent',                                  to: check_id,                                                                                              type: ID}
+    - {from: '$parent',                                  to: item_id,                                                                                               type: ID}
+    - {from: '$parent',                                  to: nested_in_modifier_id,                                                                                 type: ID}   # set by the walker: the modifier this one is nested in; null for a modifier directly on the item (parent_modifier_id below is Toast's own parentGuid field)
+    - {from: guid,                                       to: modifier_id,                                                                                           type: ID}
+    - {from: entityType,                                 to: modifier_entity_type,                                                                                  type: TEXT}
+    - {from: externalId,                                 to: modifier_external_id,                                                                                  type: ID}
+    - {from: voidDate,                                   to: modifier_void_at,                                                                                      type: TIMESTAMP_UTC}
+    - {from: fulfillmentStatus,                          to: modifier_fulfillment_status,                                                                           type: TEXT}
+    - {from: optionGroupPricingMode,                     to: modifier_group_pricing_mode,                                                                           type: TEXT}
+    - {from: selectionType,                              to: parent_item_type,                                                                                      type: TEXT}
+    - {from: price,                                      to: modifier_unit_price,                                                                                   type: NUMERIC}
+    - {from: voided,                                     to: is_voided,                                                                                             type: BOOLEAN}
+    - {from: createdByClientName,                        to: created_by_client_name,                                                                                type: TEXT}
+    - {from: storedValueTransactionId,                   to: stored_value_transaction_id/gift_card_transaction_id,                                                  type: ID}   # CHECK: Input Layer gives several names separated by '/'; kept exactly as in the sheet - name to be decided
+    - {from: item.guid,                                  to: parent_item_id,                                                                                        type: ID}
+    - {from: item.entityType,                            to: parent_item_entity_type,                                                                               type: TEXT}
+    - {from: item.externalId,                            to: parent_item_external_id,                                                                               type: ID}
+    - {from: item.multiLocationId,                       to: parent_item_multi_location_id,                                                                         type: TEXT}
+    - {from: unitOfMeasure,                              to: modifier_unit_of_measure,                                                                              type: TEXT}
+    - {from: salesCategoryPlu,                           to: sales_category_price_lookup_code,                                                                      type: TEXT}
+    - {from: toastGiftCard,                              to: is_gift_card,                                                                                          type: JSON_TEXT}   # raw is an object (toastGiftCard), not a boolean; kept whole
+    - {from: tax,                                        to: tax_amount,                                                                                            type: NUMERIC}   # money is always NUMERIC
+    - {from: modifiedDate,                               to: modified_at,                                                                                           type: TIMESTAMP_UTC}
+    - {from: deferred,                                   to: is_deferred,                                                                                           type: BOOLEAN}
+    - {from: preDiscountPrice,                           to: modifier_price_before_discount,                                                                        type: NUMERIC}
+    - {from: optionGroup.guid,                           to: modifier_group_id,                                                                                     type: ID}
+    - {from: optionGroup.entityType,                     to: modifier_group_entity_type,                                                                            type: TEXT}
+    - {from: optionGroup.externalId,                     to: modifier_group_external_id,                                                                            type: ID}
+    - {from: optionGroup.multiLocationId,                to: modifier_group_multi_location,                                                                         type: TEXT}
+    - {from: displayName,                                to: modifier_name,                                                                                         type: TEXT}
+    - {from: seatNumber,                                 to: seat_number,                                                                                           type: INT}
+    - {from: giftCardSelectionInfo,                      to: gift_card_item_info,                                                                                   type: JSON_TEXT}
+    - {from: taxInclusion,                               to: tax_inclusion,                                                                                         type: TEXT}
+    - {from: quantity,                                   to: modifier_quantity,                                                                                     type: NUMERIC}
+    - {from: receiptLinePrice,                           to: modifier_receipt_amount,                                                                               type: NUMERIC}
+    - {from: diningOption.guid,                          to: dining_option_id,                                                                                      type: ID}
+    - {from: diningOption.entityType,                    to: dining_option_entity_type,                                                                             type: TEXT}
+    - {from: diningOption.externalId,                    to: dining_option_external_id,                                                                             type: ID}
+    - {from: premodifierPlu,                             to: pre_modifier_price_lookup_code,                                                                        type: TEXT}
+    - {from: voidBusinessDate,                           to: modifier_void_business_date/item_void_business_date/check_void_business_date/order_void_business_date, type: DATE_INT}   # CHECK: Input Layer gives several names separated by '/'; kept exactly as in the sheet - name to be decided
+    - {from: createdDate,                                to: created_at,                                                                                            type: TIMESTAMP_UTC}
+    - {from: preModifier,                                to: pre_modifier,                                                                                          type: JSON_TEXT}   # reference object; always null in the sample, kept whole until its shape is confirmed
+    - {from: plu,                                        to: price_lookup_code,                                                                                     type: TEXT}
+    - {from: fulfillment,                                to: fulfilled_at,                                                                                          type: JSON_TEXT}
+    - {from: salesCategory.guid,                         to: sales_category_id,                                                                                     type: ID}
+    - {from: salesCategory.entityType,                   to: sales_category_entity_type,                                                                            type: TEXT}
+    - {from: salesCategory.externalId,                   to: sales_category_external_id,                                                                            type: ID}
+    - {from: salesCategory.multiLocationId,              to: sales_category_multi_location,                                                                         type: ID}
+    - {from: itemGroup.guid,                             to: menu_group_id/menu_category_id/menu_section_id,                                                        type: ID}   # CHECK: Input Layer gives several names separated by '/'; kept exactly as in the sheet - name to be decided
+    - {from: itemGroup.entityType,                       to: menu_group_entity_type/menu_category_entity_type/menu_section_entity_type,                             type: TEXT}   # CHECK: Input Layer gives several names separated by '/'; kept exactly as in the sheet - name to be decided
+    - {from: itemGroup.externalId,                       to: menu_group_external_id/menu_section_external_id/menu_category_external_id,                             type: ID}   # CHECK: Input Layer gives several names separated by '/'; kept exactly as in the sheet - name to be decided
+    - {from: itemGroup.multiLocationId,                  to: menu_group_multi_location_id/menu_section_multi_location_id/menu_category_multi_location_id,           type: ID}   # CHECK: Input Layer gives several names separated by '/'; kept exactly as in the sheet - name to be decided
+    - {from: parentGuid,                                 to: parent_modifier_id,                                                                                    type: ID}
+    - {from: voidReason.guid,                            to: void_reason_id,                                                                                        type: ID}
+    - {from: voidReason.entityType,                      to: void_reason_entity_type,                                                                               type: TEXT}
+    - {from: voidReason.externalId,                      to: void_reason_external_id,                                                                               type: ID}
+    - {from: splitOrigin.guid,                           to: split_origin_id,                                                                                       type: ID}
+    - {from: splitOrigin.entityType,                     to: split_origin_entity_type,                                                                              type: TEXT}
+    - {from: splitOrigin.externalId,                     to: split_origin_external_id,                                                                              type: ID}
+    - {from: refundDetails.refundAmount,                 to: refund_amount,                                                                                         type: NUMERIC}
+    - {from: refundDetails.taxRefundAmount,              to: refund_tax_amount,                                                                                     type: NUMERIC}   # money is always NUMERIC
+    - {from: refundDetails.refundTransaction.guid,       to: refund_transaction_id,                                                                                 type: ID}
+    - {from: refundDetails.refundTransaction.entityType, to: refund_details_refund_transaction_entity_type/refund_transaction_entity_type,                          type: TEXT}   # CHECK: Input Layer gives several names separated by '/'; kept exactly as in the sheet - name to be decided
+
+in_payment:
+  source_entity: orders
+  row_path: [checks, payments]
+  parents: {order_id: guid, check_id: checks.guid}
+  key: [store_location_id, payment_id]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location',                         to: store_location_id,                 type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: '$parent',                           to: order_id,                          type: ID}
+    - {from: '$index',                            to: payment_sequence,                  type: TEXT}   # position of the row in its array, set by the walker
+    - {from: '$parent',                           to: check_id,                          type: ID}
+    - {from: guid,                                to: payment_id,                        type: ID}
+    - {from: entityType,                          to: payment_entity_type,               type: TEXT}
+    - {from: externalId,                          to: payment_external_id,               type: ID}
+    - {from: originalProcessingFee,               to: payment_processing_fee_amount,     type: NUMERIC}
+    - {from: cashDrawer.guid,                     to: cash_drawer_id,                    type: ID}
+    - {from: isProcessedOffline,                  to: is_payment_processed_offline,      type: BOOLEAN}
+    - {from: type,                                to: payment_type,                      type: TEXT}
+    - {from: checkGuid,                           to: payment_check_id,                  type: TEXT}
+    - {from: paidDate,                            to: paid_at,                           type: TIMESTAMP_UTC}
+    - {from: createdByClientName,                 to: created_by_client_name,            type: TEXT}
+    - {from: networkTransactionIdentifier,        to: network_transaction_id,            type: TEXT}
+    - {from: first6Digits,                        to: card_first6_digits,                type: TEXT}
+    - {from: mcaRepaymentAmount,                  to: mca_repayment_amount,              type: NUMERIC}
+    - {from: createdDevice.id,                    to: created_device_id,                 type: ID}
+    - {from: tenderTransactionGuid,               to: tender_transaction_id,             type: TEXT}
+    - {from: paidBusinessDate,                    to: paid_business_date,                type: DATE_INT}
+    - {from: last4Digits,                         to: card_last4_digits,                 type: TEXT}
+    - {from: surchargeAmount,                     to: surcharge_amount,                  type: NUMERIC}
+    - {from: lastModifiedDevice.id,               to: last_modified_device_id,           type: ID}
+    - {from: refundStatus,                        to: refund_status,                     type: TEXT}
+    - {from: otherPayment.guid,                   to: other_payment_id,                  type: ID}
+    - {from: otherPayment.entityType,             to: other_payment_entity_type,         type: TEXT}
+    - {from: otherPayment.externalId,             to: other_payment_external_id,         type: ID}
+    - {from: orderGuid,                           to: payment_order_id,                  type: TEXT}
+    - {from: paymentMethodId,                     to: payment_method_id,                 type: ID}
+    - {from: cardEntryMode,                       to: card_entry_mode,                   type: TEXT}
+    - {from: paymentStatus,                       to: payment_status,                    type: TEXT}
+    - {from: amount,                              to: payment_amount,                    type: NUMERIC}
+    - {from: tipAmount,                           to: payment_tip_amount,                type: NUMERIC}
+    - {from: amountTendered,                      to: payment_amount_tendered,           type: NUMERIC}
+    - {from: cardType,                            to: card_type,                         type: TEXT}
+    - {from: houseAccount.guid,                   to: house_account_id,                  type: ID}
+    - {from: cardProcessorType,                   to: card_processor_type,               type: TEXT}
+    - {from: server.guid,                         to: server_id,                         type: ID}
+    - {from: server.entityType,                   to: server_entity_type,                type: TEXT}
+    - {from: server.externalId,                   to: server_external_id,                type: ID}
+    - {from: voidInfo.voidDate,                   to: payment_void_at,                   type: TIMESTAMP_UTC}
+    - {from: voidInfo.voidBusinessDate,           to: payment_void_business_date,        type: DATE_INT}
+    - {from: voidInfo.voidUser.guid,              to: payment_void_user_id,              type: ID}
+    - {from: voidInfo.voidUser.entityType,        to: payment_void_user_entity_type,     type: TEXT}
+    - {from: voidInfo.voidUser.externalId,        to: payment_void_user_external_id,     type: ID}
+    - {from: voidInfo.voidApprover.guid,          to: payment_void_approver_id,          type: ID}
+    - {from: voidInfo.voidApprover.entityType,    to: payment_void_approver_entity_type, type: TEXT}
+    - {from: voidInfo.voidApprover.externalId,    to: payment_void_approver_external_id, type: ID}
+    - {from: voidInfo.voidReason.guid,            to: payment_void_reason_id,            type: ID}
+    - {from: voidInfo.voidReason.entityType,      to: payment_void_reason_entity_type,   type: TEXT}
+    - {from: voidInfo.voidReason.externalId,      to: payment_void_reason_external_id,   type: ID}
+    - {from: refund.refundAmount,                 to: payment_refund_amount,             type: NUMERIC}
+    - {from: refund.tipRefundAmount,              to: payment_refund_tip_amount,         type: NUMERIC}
+    - {from: refund.refundDate,                   to: payment_refund_at,                 type: TIMESTAMP_UTC}
+    - {from: refund.refundBusinessDate,           to: payment_refund_business_date,      type: DATE_INT}
+    - {from: refund.refundTransaction.guid,       to: refund_transaction_id,             type: ID}
+    - {from: refund.refundTransaction.entityType, to: refund_transaction_entity_type,    type: TEXT}
+    - {from: refund.refundStrategy,               to: payment_refund_strategy,           type: TEXT}
+
+in_tax:
+  source_entity: orders
+  rows:
+    - path: [checks, selections, appliedTaxes]
+      parents: {order_id: guid, check_id: checks.guid, item_id: checks.selections.guid}
+    - path: [checks, selections, 'modifiers*', appliedTaxes]
+      parents: {order_id: guid, check_id: checks.guid, item_id: checks.selections.guid, modifier_id: checks.selections.modifiers.guid}
+    - path: [checks, appliedServiceCharges, appliedTaxes]
+      parents: {order_id: guid, check_id: checks.guid, check_service_charge_id: checks.appliedServiceCharges.guid}
+  key: [store_location_id, tax_id]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location',                   to: store_location_id,           type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: '$parent',                     to: order_id,                    type: ID}
+    - {from: '$index',                      to: appliedtaxes_sequence,       type: TEXT}   # position of the row in its array, set by the walker
+    - {from: '$parent',                     to: check_id,                    type: ID}
+    - {from: '$parent',                     to: item_id,                     type: ID}
+    - {from: '$parent',                     to: modifier_id,                 type: ID}   # set when the tax is on a modifier
+    - {from: '$parent',                     to: check_service_charge_id,     type: ID}   # set when the tax is on a service charge
+    - {from: guid,                          to: tax_id,                      type: ID}
+    - {from: entityType,                    to: tax_entity_type,             type: TEXT}
+    - {from: applicationOrdinal,            to: tax_application_order,       type: INT}
+    - {from: jurisdictionType,              to: tax_jurisdiction_type,       type: TEXT}
+    - {from: displayName,                   to: tax_display_name,            type: TEXT}
+    - {from: jurisdiction,                  to: tax_jurisdiction,            type: TEXT}
+    - {from: type,                          to: tax_type,                    type: TEXT}
+    - {from: facilitatorCollectAndRemitTax, to: is_tax_marketplace_remitted, type: BOOLEAN}
+    - {from: taxRate.guid,                  to: tax_rate_id,                 type: ID}
+    - {from: taxRate.entityType,            to: tax_rate_entity_type,        type: TEXT}
+    - {from: rate,                          to: tax_rate,                    type: NUMERIC}
+    - {from: name,                          to: tax_name,                    type: TEXT}
+    - {from: taxAmount,                     to: tax_amount,                  type: NUMERIC}
+
+in_discount:
+  source_entity: orders
+  rows:
+    - path: [checks, appliedDiscounts]
+      parents: {order_id: guid, check_id: checks.guid}
+    - path: [checks, selections, appliedDiscounts]
+      parents: {order_id: guid, check_id: checks.guid, item_id: checks.selections.guid}
+    - path: [checks, selections, 'modifiers*', appliedDiscounts]
+      parents: {order_id: guid, check_id: checks.guid, item_id: checks.selections.guid, modifier_id: checks.selections.modifiers.guid}
+  key: [store_location_id, discount_id]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location',                                     to: store_location_id,               type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: '$parent',                                       to: order_id,                        type: ID}
+    - {from: '$index',                                        to: source_array_index,              type: TEXT}   # position of the row in its array, set by the walker
+    - {from: '$parent',                                       to: check_id,                        type: ID}
+    - {from: '$parent',                                       to: item_id,                         type: ID}   # null for a check-level discount
+    - {from: '$parent',                                       to: modifier_id,                     type: ID}   # set when the discount is on a modifier
+    - {from: guid,                                            to: discount_id,                     type: ID}
+    - {from: entityType,                                      to: discount_entity_type,            type: TEXT}
+    - {from: externalId,                                      to: discount_external_id,            type: ID}
+    - {from: approver.guid,                                   to: discount_approver_id,            type: ID}
+    - {from: approver.entityType,                             to: discount_approver_entity_type,   type: TEXT}
+    - {from: approver.externalId,                             to: discount_approver_external_id,   type: ID}
+    - {from: loyaltyDetails.vendor,                           to: discount_loyalty_vendor,         type: TEXT}
+    - {from: loyaltyDetails.referenceId,                      to: discount_loyalty_reference_id,   type: TEXT}
+    - {from: discountPercent,                                 to: discount_percent,                type: NUMERIC}
+    - {from: discountAmount,                                  to: discount_amount,                 type: NUMERIC}
+    - {from: discount.guid,                                   to: discount_definition_id,          type: ID}
+    - {from: discount.entityType,                             to: discount_definition_entity_type, type: TEXT}
+    - {from: appliedPromoCode,                                to: applied_promo_code,              type: TEXT}
+    - {from: processingState,                                 to: processing_state,                type: TEXT}
+    - {from: name,                                            to: discount_name,                   type: TEXT}
+    - {from: nonTaxDiscountAmount,                            to: non_tax_discount_amount,         type: NUMERIC}
+    - {from: discountType,                                    to: discount_type,                   type: TEXT}
+    - {from: discountPlu,                                     to: discount_plu,                    type: TEXT}
+    - {from: appliedDiscountReason.name,                      to: discount_reason_name,            type: TEXT}
+    - {from: appliedDiscountReason.description,               to: discount_reason_description,     type: TEXT}
+    - {from: appliedDiscountReason.comment,                   to: discount_reason_comment,         type: TEXT}
+    - {from: appliedDiscountReason.discountReason.guid,       to: discount_reason_id,              type: ID}
+    - {from: appliedDiscountReason.discountReason.entityType, to: discount_reason_entity_type,     type: TEXT}
+
+in_discount_combo_item:
+  source_entity: orders
+  rows:   # always empty in the sample
+    - path: [checks, appliedDiscounts, comboItems]
+      parents: {order_id: guid, check_id: checks.guid, discount_id: checks.appliedDiscounts.guid}
+    - path: [checks, selections, appliedDiscounts, comboItems]
+      parents: {order_id: guid, check_id: checks.guid, item_id: checks.selections.guid, discount_id: checks.selections.appliedDiscounts.guid}
+  key: [store_location_id, discount_id, source_array_index]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location', to: store_location_id,      type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: '$parent',   to: order_id,               type: ID}
+    - {from: '$parent',   to: check_id,               type: ID}
+    - {from: '$parent',   to: item_id,                type: ID}   # null for a check-level discount
+    - {from: '$parent',   to: discount_id,            type: ID}
+    - {from: '$index',    to: source_array_index,     type: TEXT}   # position of the row in its array, set by the walker
+    - {from: guid,        to: combo_item_id,          type: ID}
+    - {from: entityType,  to: combo_item_entity_type, type: TEXT}
+    - {from: externalId,  to: combo_item_external_id, type: ID}
+
+in_discount_trigger_item:
+  source_entity: orders
+  rows:
+    - path: [checks, appliedDiscounts, triggers]
+      parents: {order_id: guid, check_id: checks.guid, discount_id: checks.appliedDiscounts.guid}
+    - path: [checks, selections, appliedDiscounts, triggers]
+      parents: {order_id: guid, check_id: checks.guid, item_id: checks.selections.guid, discount_id: checks.selections.appliedDiscounts.guid}
+  key: [store_location_id, discount_id, source_array_index]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location',          to: store_location_id,     type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: '$parent',            to: order_id,              type: ID}
+    - {from: '$index',             to: source_array_index,    type: TEXT}   # position of the row in its array, set by the walker
+    - {from: '$parent',            to: check_id,              type: ID}
+    - {from: '$parent',            to: item_id,               type: ID}   # null for a check-level discount
+    - {from: '$parent',            to: discount_id,           type: ID}
+    - {from: selection.guid,       to: trigger_item_id,       type: ID}
+    - {from: selection.entityType, to: selection_entity_type, type: TEXT}
+    - {from: selection.externalId, to: selection_external_id, type: ID}
+    - {from: quantity,             to: triggers_quantity,     type: INT}   # CHECK: Input Layer says NUMERIC, SOR says integer
+
+in_item_stock:
+  source_entity: inventory
+  row_path: []   # each line is one record
+  key: [store_location_id, inventory_id]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: guid,             to: inventory_id,             type: ID}
+    - {from: itemGuidValidity, to: item_guid_validity,       type: TEXT}
+    - {from: status,           to: stock_status,             type: TEXT}
+    - {from: quantity,         to: stock_quantity,           type: NUMERIC}
+    - {from: multiLocationId,  to: menu_item_multi_location, type: ID}
+    - {from: versionId,        to: stock_version_id,         type: TEXT}
+    - {from: '$location',      to: store_location_id,        type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+
+in_cash_entry:
+  source_entity: cash_entries
+  row_path: []   # each line is one record
+  key: [store_location_id, cash_entry_id]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: guid,                                   to: cash_entry_id,                     type: ID}
+    - {from: entityType,                             to: cash_entry_entity_type,            type: TEXT}
+    - {from: date,                                   to: cash_entry_at,                     type: TIMESTAMP_UTC}
+    - {from: reason,                                 to: cash_entry_reason,                 type: TEXT}
+    - {from: amount,                                 to: cash_entry_amount,                 type: NUMERIC}
+    - {from: payoutReason,                           to: payout_reason_id,                  type: ID}
+    - {from: cashDrawer.guid,                        to: cash_drawer_id,                    type: ID}
+    - {from: cashDrawer.entityType,                  to: cash_drawer_entity_type,           type: TEXT}
+    - {from: approverOrShiftReviewSubject,           to: approver_or_reviewer,              type: TEXT}
+    - {from: type,                                   to: cash_entry_type,                   type: TEXT}
+    - {from: undoes,                                 to: undoes_cash_entry_id,              type: ID}
+    - {from: noSaleReason.guid,                      to: no_sale_reason_id,                 type: ID}
+    - {from: noSaleReason.entityType,                to: no_sale_reason_entity_type,        type: TEXT}
+    - {from: employee1.guid,                         to: cash_entry_employee_1_id,          type: ID}
+    - {from: employee1.entityType,                   to: cash_entry_employee_1_entity_type, type: TEXT}
+    - {from: employee1.externalId,                   to: cash_entry_employee_1_external_id, type: ID}
+    - {from: employee2,                              to: cash_entry_employee_2_id,          type: ID}
+    - {from: creatorOrShiftReviewSubject.guid,       to: creator_or_reviewer_id,            type: ID}
+    - {from: creatorOrShiftReviewSubject.entityType, to: creator_or_reviewer_entity_type,   type: TEXT}
+    - {from: '$location',                            to: store_location_id,                 type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+
+in_config_menu_group:
+  source_entity: menu_groups
+  row_path: []   # each line is one record
+  key: [store_location_id, menu_group_id]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location',          to: store_location_id,              type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: inheritOptionGroups,  to: is_inherits_modifier_groups,    type: BOOLEAN}
+    - {from: visibility,           to: is_menu_group_visible,          type: TEXT}   # raw values ALL / POS_ONLY / NONE - not a boolean
+    - {from: unitOfMeasure,        to: menu_group_unit_of_measure,     type: TEXT}
+    - {from: orderableOnline,      to: is_menu_group_orderable_online, type: TEXT}   # raw values Yes / No (text), kept as text
+    - {from: name,                 to: menu_group_name,                type: TEXT}
+    - {from: menu.guid,            to: parent_menu_id,                 type: ID}
+    - {from: menu.entityType,      to: parent_menu_entity_type,        type: TEXT}
+    - {from: menu.externalId,      to: parent_menu_external_id,        type: ID}
+    - {from: guid,                 to: menu_group_id,                  type: ID}   # Input Layer gave several names; first one used. Others: menu_category_id, menu_section_id
+    - {from: entityType,           to: entity_type,                    type: TEXT}
+    - {from: externalId,           to: external_id,                    type: ID}
+    - {from: parent.guid,          to: menu_group_parent_id,           type: ID}
+    - {from: parent.entityType,    to: menu_group_parent_entity_type,  type: TEXT}
+    - {from: parent.externalId,    to: menu_group_parent_external_id,  type: ID}
+    - {from: inheritUnitOfMeasure, to: inherits_unit_of_measure,       type: BOOLEAN}
+
+in_config_menu_group_item:
+  source_entity: menu_groups
+  row_path: [items]
+  parents: {menu_group_id: guid}
+  key: [store_location_id, menu_group_id, menu_item_id]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location', to: store_location_id,     type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: '$parent',   to: menu_group_id,         type: ID}
+    - {from: '$index',    to: source_array_index,    type: TEXT}   # position of the row in its array, set by the walker
+    - {from: guid,        to: menu_item_id,          type: ID}
+    - {from: entityType,  to: menu_item_entity_type, type: TEXT}
+    - {from: externalId,  to: menu_item_external_id, type: ID}
+
+in_config_menu_group_modifier_group:
+  source_entity: menu_groups
+  row_path: [optionGroups]
+  parents: {menu_group_id: guid}
+  key: [store_location_id, menu_group_id, modifier_group_id]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location', to: store_location_id,          type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: '$parent',   to: menu_group_id,              type: ID}
+    - {from: '$index',    to: source_array_index,         type: TEXT}   # position of the row in its array, set by the walker
+    - {from: guid,        to: modifier_group_id,          type: ID}
+    - {from: entityType,  to: modifier_group_entity_type, type: TEXT}
+    - {from: externalId,  to: modifier_group_external_id, type: ID}
+
+in_config_menu_group_subgroup:
+  source_entity: menu_groups
+  row_path: [subgroups]
+  parents: {menu_group_id: guid}
+  key: [store_location_id, menu_group_id, subgroup_id]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location', to: store_location_id,    type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: '$parent',   to: menu_group_id,        type: ID}
+    - {from: '$index',    to: source_array_index,   type: TEXT}   # position of the row in its array, set by the walker
+    - {from: guid,        to: subgroup_id,          type: ID}
+    - {from: entityType,  to: subgroup_entity_type, type: TEXT}
+    - {from: externalId,  to: subgroup_external_id, type: ID}
+
+in_config_menu_group_image:
+  source_entity: menu_groups
+  row_path: [images]
+  parents: {menu_group_id: guid}
+  key: [store_location_id, menu_group_id, source_array_index]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location', to: store_location_id,  type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: '$parent',   to: menu_group_id,      type: ID}
+    - {from: '$index',    to: source_array_index, type: TEXT}   # position of the row in its array, set by the walker
+    - {from: url,         to: image_url,          type: TEXT}
+
+in_config_menu_item:
+  source_entity: menu_items
+  row_path: []   # each line is one record
+  key: [store_location_id, menu_item_id]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location',          to: store_location_id,             type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: guid,                 to: menu_item_id,                  type: ID}
+    - {from: entityType,           to: entity_type,                   type: TEXT}
+    - {from: externalId,           to: external_id,                   type: ID}
+    - {from: inheritUnitOfMeasure, to: is_inherits_unit_of_measure,   type: BOOLEAN}
+    - {from: inheritOptionGroups,  to: is_inherits_modifier_groups,   type: BOOLEAN}
+    - {from: visibility,           to: menu_item_visibility,          type: TEXT}   # raw values ALL / POS_ONLY / NONE - not a boolean
+    - {from: unitOfMeasure,        to: menu_item_unit_of_measure,     type: TEXT}
+    - {from: orderableOnline,      to: is_menu_item_orderable_online, type: TEXT}   # raw values Yes / No (text), kept as text
+    - {from: name,                 to: menu_item_name,                type: TEXT}
+    - {from: plu,                  to: menu_item_price_lookup_code,   type: TEXT}
+    - {from: calories,             to: menu_item_calories,            type: NUMERIC}
+    - {from: sku,                  to: menu_item_sku,                 type: TEXT}
+    - {from: type,                 to: menu_item_type,                type: TEXT}
+
+in_config_menu_item_modifier_group:
+  source_entity: menu_items
+  row_path: [optionGroups]
+  parents: {menu_item_id: guid}
+  key: [store_location_id, menu_item_id, modifier_group_id]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location', to: store_location_id,          type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: '$parent',   to: menu_item_id,               type: ID}
+    - {from: '$index',    to: source_array_index,         type: TEXT}   # position of the row in its array, set by the walker
+    - {from: guid,        to: modifier_group_id,          type: ID}
+    - {from: entityType,  to: modifier_group_entity_type, type: TEXT}
+    - {from: externalId,  to: modifier_group_external_id, type: ID}
+
+in_config_menu_item_image:
+  source_entity: menu_items
+  row_path: [images]
+  parents: {menu_item_id: guid}
+  key: [store_location_id, menu_item_id, source_array_index]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location', to: store_location_id,  type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: '$parent',   to: menu_item_id,       type: ID}
+    - {from: '$index',    to: source_array_index, type: TEXT}   # position of the row in its array, set by the walker
+    - {from: url,         to: image_url,          type: TEXT}
+
+in_config_modifier_group:
+  source_entity: menu_option_groups
+  row_path: []   # each line is one record
+  key: [store_location_id, modifier_group_id]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location',   to: store_location_id,   type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: guid,          to: modifier_group_id,   type: ID}
+    - {from: entityType,    to: entity_type,         type: TEXT}
+    - {from: externalId,    to: external_id,         type: ID}
+    - {from: name,          to: modifier_group_name, type: TEXT}
+    - {from: minSelections, to: min_items,           type: INT}
+    - {from: maxSelections, to: max_items,           type: INT}
+
+in_config_modifier_group_option:
+  source_entity: menu_option_groups
+  row_path: [options]
+  parents: {modifier_group_id: guid}
+  key: [store_location_id, modifier_group_id, option_menu_item_id]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location', to: store_location_id,            type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: '$parent',   to: modifier_group_id,            type: ID}
+    - {from: '$index',    to: source_array_index,           type: TEXT}   # position of the row in its array, set by the walker
+    - {from: guid,        to: option_menu_item_id,          type: ID}
+    - {from: entityType,  to: option_menu_item_entity_type, type: TEXT}
+    - {from: externalId,  to: option_menu_item_external_id, type: ID}
+
+in_config_menu:
+  source_entity: null   # no matching entity in the ETL catalog (config.menus)
+  row_path: []   # each line is one record
+  key: [store_location_id, menu_id]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location',     to: store_location_id,        type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: guid,            to: menu_id,                  type: ID}
+    - {from: entityType,      to: entity_type,              type: TEXT}
+    - {from: externalId,      to: external_id,              type: ID}
+    - {from: name,            to: menu_name,                type: TEXT}
+    - {from: visibility,      to: menu_visibility,          type: TEXT}   # raw values ALL / POS_ONLY / NONE - not a boolean
+    - {from: unitOfMeasure,   to: menu_unit_of_measure,     type: TEXT}
+    - {from: orderableOnline, to: is_menu_orderable_online, type: TEXT}   # raw values Yes / No (text), kept as text
+
+in_config_menu_menu_group:
+  source_entity: null   # no matching entity in the ETL catalog (config.menus)
+  row_path: [groups]
+  parents: {menu_id: guid}
+  key: [store_location_id, menu_id, menu_group_id]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location', to: store_location_id,      type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: '$parent',   to: menu_id,                type: ID}
+    - {from: '$index',    to: source_array_index,     type: TEXT}   # position of the row in its array, set by the walker
+    - {from: guid,        to: menu_group_id,          type: ID}
+    - {from: entityType,  to: menu_group_entity_type, type: TEXT}
+    - {from: externalId,  to: menu_group_external_id, type: ID}
+
+in_config_menu_image:
+  source_entity: null   # no matching entity in the ETL catalog (config.menus)
+  row_path: [images]
+  parents: {menu_id: guid}
+  key: [store_location_id, menu_id, source_array_index]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location', to: store_location_id,  type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: '$parent',   to: menu_id,            type: ID}
+    - {from: '$index',    to: source_array_index, type: TEXT}   # position of the row in its array, set by the walker
+    - {from: url,         to: image_url,          type: TEXT}
+
+in_config_no_sale_reason:
+  source_entity: no_sale_reasons
+  row_path: []   # each line is one record
+  key: [store_location_id, no_sale_reason_id]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location', to: store_location_id,   type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: guid,        to: no_sale_reason_id,   type: ID}
+    - {from: entityType,  to: entity_type,         type: TEXT}
+    - {from: name,        to: no_sale_reason_name, type: TEXT}
+
+in_config_payout_reason:
+  source_entity: payout_reasons
+  row_path: []   # each line is one record
+  key: [store_location_id, payout_reason_id]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location', to: store_location_id,  type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: guid,        to: payout_reason_id,   type: ID}
+    - {from: entityType,  to: entity_type,        type: TEXT}
+    - {from: name,        to: payout_reason_name, type: TEXT}
+
+in_config_price_group:
+  source_entity: price_groups
+  row_path: []   # each line is one record
+  key: [store_location_id, price_group_id]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location', to: store_location_id, type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: guid,        to: price_group_id,    type: ID}
+    - {from: entityType,  to: entity_type,       type: TEXT}
+    - {from: name,        to: price_group_name,  type: TEXT}
+
+in_config_printer:
+  source_entity: printers
+  row_path: []   # each line is one record
+  key: [store_location_id, printer_id]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location', to: store_location_id, type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: guid,        to: printer_id,        type: ID}
+    - {from: entityType,  to: entity_type,       type: TEXT}
+    - {from: name,        to: printer_name,      type: TEXT}
+
+in_config_service_period:
+  source_entity: restaurant_services
+  row_path: []   # each line is one record
+  key: [store_location_id, service_window_id]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location', to: store_location_id,   type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: guid,        to: service_window_id,   type: ID}
+    - {from: entityType,  to: entity_type,         type: TEXT}
+    - {from: name,        to: service_window_name, type: TEXT}
+
+in_config_revenue_center:
+  source_entity: revenue_centers
+  row_path: []   # each line is one record
+  key: [store_location_id, revenue_center_id]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location', to: store_location_id,          type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: guid,        to: revenue_center_id,          type: ID}
+    - {from: entityType,  to: entity_type,                type: TEXT}
+    - {from: name,        to: revenue_center_name,        type: TEXT}
+    - {from: description, to: revenue_center_description, type: TEXT}
+
+in_config_sales_category:
+  source_entity: sales_categories
+  row_path: []   # each line is one record
+  key: [store_location_id, sales_category_id]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location', to: store_location_id,   type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: guid,        to: sales_category_id,   type: ID}
+    - {from: entityType,  to: entity_type,         type: TEXT}
+    - {from: name,        to: sales_category_name, type: TEXT}
+
+in_config_service_area:
+  source_entity: service_areas
+  row_path: []   # each line is one record
+  key: [store_location_id, service_area_id]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location',   to: store_location_id, type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: guid,          to: service_area_id,   type: ID}
+    - {from: entityType,    to: entity_type,       type: TEXT}
+    - {from: name,          to: service_area_name, type: TEXT}
+    - {from: revenueCenter, to: revenue_center_id, type: ID}
+
+in_config_service_charge:
+  source_entity: service_charges
+  row_path: []   # each line is one record
+  key: [store_location_id, service_charge_id]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location',                  to: store_location_id,                 type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: guid,                         to: service_charge_id,                 type: ID}
+    - {from: entityType,                   to: entity_type,                       type: TEXT}
+    - {from: externalId,                   to: external_id,                       type: ID}
+    - {from: amountType,                   to: service_charge_type,               type: TEXT}
+    - {from: amount,                       to: service_charge_amount,             type: NUMERIC}
+    - {from: taxInclusive,                 to: is_tax_inclusive,                  type: BOOLEAN}
+    - {from: taxable,                      to: is_taxable_charge,                 type: BOOLEAN}
+    - {from: serviceChargeCalculation,     to: service_charge_calculation_method, type: TEXT}
+    - {from: criteria.minCheckAmount,      to: auto_apply_min_check_amount,       type: NUMERIC}
+    - {from: criteria.maxCheckAmount,      to: auto_apply_max_check_amount,       type: NUMERIC}
+    - {from: criteria.minDeliveryDistance, to: auto_apply_min_delivery_distance,  type: NUMERIC}
+    - {from: criteria.delivery,            to: auto_apply_on_delivery,            type: BOOLEAN}
+    - {from: criteria.takeout,             to: auto_apply_on_takeout,             type: BOOLEAN}
+    - {from: criteria.dineIn,              to: auto_apply_on_dine_in,             type: BOOLEAN}
+    - {from: name,                         to: service_charge_name,               type: TEXT}
+    - {from: destination,                  to: service_charge_destination,        type: TEXT}
+    - {from: gratuity,                     to: is_gratuity_charge,                type: BOOLEAN}
+    - {from: taxProrated,                  to: is_tax_prorated,                   type: BOOLEAN}
+    - {from: percent,                      to: service_charge_percent,            type: NUMERIC}
+
+in_config_service_charge_tax:
+  source_entity: service_charges
+  row_path: [applicableTaxes]
+  parents: {service_charge_id: guid}
+  key: [store_location_id, service_charge_id, tax_config_id]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location',         to: store_location_id,      type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: '$parent',           to: service_charge_id,      type: ID}
+    - {from: '$index',            to: source_array_index,     type: TEXT}   # position of the row in its array, set by the walker
+    - {from: guid,                to: tax_config_id,          type: ID}
+    - {from: entityType,          to: tax_config_entity_type, type: TEXT}
+    - {from: isDefault,           to: is_default_tax,         type: BOOLEAN}
+    - {from: name,                to: tax_name,               type: TEXT}
+    - {from: type,                to: tax_type,               type: TEXT}
+    - {from: rate,                to: tax_rate,               type: NUMERIC}
+    - {from: roundingType,        to: tax_rounding_type,      type: TEXT}
+    - {from: conditionalTaxRates, to: conditional_tax_rates,  type: JSON_TEXT}   # array; always empty in the sample, element shape unknown
+    - {from: taxTable,            to: tax_table,              type: JSON_TEXT}   # array; always empty in the sample, element shape unknown
+
+in_config_dining_table:
+  source_entity: tables
+  row_path: []   # each line is one record
+  key: [store_location_id, table_config_id]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location',   to: store_location_id, type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: guid,          to: table_config_id,   type: ID}
+    - {from: entityType,    to: entity_type,       type: TEXT}
+    - {from: name,          to: table_name,        type: TEXT}
+    - {from: revenueCenter, to: revenue_center_id, type: ID}
+    - {from: serviceArea,   to: service_area_id,   type: ID}
+
+in_config_tax_rate:
+  source_entity: tax_rates
+  row_path: []   # each line is one record
+  key: [store_location_id, tax_config_id]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location',         to: store_location_id,     type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: guid,                to: tax_config_id,         type: ID}
+    - {from: entityType,          to: entity_type,           type: TEXT}
+    - {from: isDefault,           to: is_default,            type: BOOLEAN}
+    - {from: conditionalTaxRates, to: conditional_tax_rates, type: JSON_TEXT}   # raw is an array; always empty in the sample, element shape unknown
+    - {from: taxTable,            to: tax_table_reference,   type: JSON_TEXT}   # raw is an array; always empty in the sample, element shape unknown
+    - {from: rate,                to: tax_config_rate,       type: NUMERIC}
+    - {from: roundingType,        to: rounding_type,         type: TEXT}
+    - {from: name,                to: tax_config_name,       type: TEXT}
+    - {from: type,                to: tax_config_type,       type: TEXT}
+
+in_config_tip_withholding:
+  source_entity: tip_withholding
+  row_path: []   # each line is one record
+  key: [store_location_id, tip_withholding_id]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location', to: store_location_id,          type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: guid,        to: tip_withholding_id,         type: ID}
+    - {from: entityType,  to: entity_type,                type: TEXT}
+    - {from: enabled,     to: is_tip_withholding_enabled, type: BOOLEAN}
+    - {from: percentage,  to: withholding_percent,        type: NUMERIC}
+
+in_config_void_reason:
+  source_entity: void_reasons
+  row_path: []   # each line is one record
+  key: [store_location_id, void_reason_id]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location', to: store_location_id, type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: guid,        to: void_reason_id,    type: ID}
+    - {from: entityType,  to: entity_type,       type: TEXT}
+    - {from: name,        to: void_reason_name,  type: TEXT}
+
+in_config_break_type:
+  source_entity: break_types
+  row_path: []   # each line is one record
+  key: [store_location_id, break_type_id]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location',               to: store_location_id,            type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: guid,                      to: break_type_id,                type: ID}
+    - {from: entityType,                to: entity_type,                  type: TEXT}
+    - {from: duration,                  to: break_duration_minutes,       type: NUMERIC}
+    - {from: trackMissedBreaks,         to: tracks_missed_breaks,         type: BOOLEAN}
+    - {from: name,                      to: break_type_name,              type: TEXT}
+    - {from: paid,                      to: is_paid_break,                type: BOOLEAN}
+    - {from: active,                    to: is_break_active,              type: BOOLEAN}
+    - {from: breakIntervalHrs,          to: break_interval_hours,         type: NUMERIC}
+    - {from: breakIntervalMins,         to: break_interval_minutes,       type: NUMERIC}
+    - {from: trackBreakAcknowledgement, to: tracks_break_acknowledgement, type: BOOLEAN}
+    - {from: enforceMinimumTime,        to: enforces_minimum_break_time,  type: BOOLEAN}
+
+in_menus_metadata:
+  source_entity: menus
+  row_path: []   # each line is one record
+  key: [store_location_id]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: restaurantGuid, to: restaurant_id,       type: ID}
+    - {from: lastUpdated,    to: menu_last_synced_at, type: TIMESTAMP_UTC}
+    - {from: '$location',    to: store_location_id,   type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+
+in_menus_menus:
+  source_entity: menus
+  row_path: [menus]
+  parents: {restaurant_id: restaurantGuid, menu_last_synced_at: lastUpdated, restaurant_timezone: restaurantTimeZone}
+  key: [store_location_id, menu_id]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location',                  to: store_location_id,            type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: '$parent',                    to: restaurant_id,                type: ID}
+    - {from: '$parent',                    to: menu_last_synced_at,          type: TIMESTAMP_UTC}
+    - {from: '$parent',                    to: restaurant_timezone,          type: TEXT}
+    - {from: '$index',                     to: source_array_index,           type: TEXT}   # position of the row in its array, set by the walker
+    - {from: name,                         to: menu_name,                    type: TEXT}
+    - {from: posName,                      to: menu_pos_name,                type: TEXT}
+    - {from: guid,                         to: menu_id,                      type: ID}
+    - {from: multiLocationId,              to: menu_multi_store_location_id, type: TEXT}
+    - {from: masterId,                     to: master_id,                    type: TEXT}
+    - {from: description,                  to: menu_description,             type: TEXT}
+    - {from: highResImage,                 to: menu_high_res_image_url,      type: TEXT}
+    - {from: image,                        to: menu_image_url,               type: TEXT}
+    - {from: availability.alwaysAvailable, to: is_always_available,          type: BOOLEAN}
+    - {from: posButtonColorLight,          to: menu_pos_button_color_light,  type: TEXT}
+    - {from: posButtonColorDark,           to: menu_pos_button_color_dark,   type: TEXT}
+    - {from: availability.schedule,        to: menu_availability_schedule,   type: JSON_TEXT}   # in the Toast docs, not in the SOR export; kept whole
+
+in_menus_menu_visibility:
+  source_entity: menus
+  row_path: [menus, visibility]
+  parents: {restaurant_id: restaurantGuid, menu_last_synced_at: lastUpdated, restaurant_timezone: restaurantTimeZone, menu_id: menus.guid}
+  key: [store_location_id, menu_id, visibility]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location', to: store_location_id,   type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: '$parent',   to: restaurant_id,       type: ID}
+    - {from: '$parent',   to: menu_last_synced_at, type: TIMESTAMP_UTC}
+    - {from: '$parent',   to: restaurant_timezone, type: TEXT}
+    - {from: '$parent',   to: menu_id,             type: ID}
+    - {from: '$index',    to: source_array_index,  type: TEXT}   # position of the row in its array, set by the walker
+    - {from: '$value',    to: visibility,          type: TEXT}
+
+in_menus_menu_groups:
+  source_entity: menus
+  row_path: [menus, 'menuGroups*']
+  parents: {restaurant_id: restaurantGuid, menu_last_synced_at: lastUpdated, restaurant_timezone: restaurantTimeZone, menu_id: menus.guid, menu_name: menus.name, menu_group_parent_id: ^menus.menuGroups.guid}
+  key: [store_location_id, menu_id, menu_group_id]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location',         to: store_location_id,                  type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: '$parent',           to: restaurant_id,                      type: ID}
+    - {from: '$parent',           to: menu_last_synced_at,                type: TIMESTAMP_UTC}
+    - {from: '$parent',           to: restaurant_timezone,                type: TEXT}
+    - {from: '$parent',           to: menu_id,                            type: ID}
+    - {from: '$parent',           to: menu_name,                          type: TEXT}
+    - {from: '$parent',           to: menu_group_parent_id,               type: ID}   # null for a top-level group
+    - {from: '$index',            to: source_array_index,                 type: TEXT}   # position of the row in its array, set by the walker
+    - {from: name,                to: menu_group_name,                    type: TEXT}
+    - {from: posName,             to: menu_group_pos_name,                type: TEXT}
+    - {from: guid,                to: menu_group_id,                      type: ID}
+    - {from: multiLocationId,     to: menu_group_multi_store_location_id, type: TEXT}
+    - {from: masterId,            to: master_id,                          type: TEXT}
+    - {from: description,         to: menu_group_description,             type: TEXT}
+    - {from: image,               to: menu_group_image_url,               type: TEXT}
+    - {from: posButtonColorLight, to: pos_button_color_light,             type: TEXT}
+    - {from: posButtonColorDark,  to: pos_button_color_dark,              type: TEXT}
+    - {from: combos,              to: menu_group_combos,                  type: JSON_TEXT}   # in the Toast docs, not in the SOR export; kept whole
+
+in_menus_menu_group_visibility:
+  source_entity: menus
+  row_path: [menus, 'menuGroups*', visibility]
+  parents: {restaurant_id: restaurantGuid, menu_last_synced_at: lastUpdated, restaurant_timezone: restaurantTimeZone, menu_id: menus.guid, menu_name: menus.name, menu_group_parent_id: ^menus.menuGroups.guid, menu_group_id: menus.menuGroups.guid}
+  key: [store_location_id, menu_id, menu_group_id, visibility]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location', to: store_location_id,    type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: '$parent',   to: restaurant_id,        type: ID}
+    - {from: '$parent',   to: menu_last_synced_at,  type: TIMESTAMP_UTC}
+    - {from: '$parent',   to: restaurant_timezone,  type: TEXT}
+    - {from: '$parent',   to: menu_id,              type: ID}
+    - {from: '$parent',   to: menu_name,            type: TEXT}
+    - {from: '$parent',   to: menu_group_parent_id, type: ID}
+    - {from: '$parent',   to: menu_group_id,        type: ID}
+    - {from: '$index',    to: source_array_index,   type: TEXT}   # position of the row in its array, set by the walker
+    - {from: '$value',    to: visibility,           type: TEXT}
+
+in_menus_menu_group_tag:
+  source_entity: menus
+  row_path: [menus, 'menuGroups*', itemTags]
+  parents: {restaurant_id: restaurantGuid, menu_last_synced_at: lastUpdated, restaurant_timezone: restaurantTimeZone, menu_id: menus.guid, menu_name: menus.name, menu_group_parent_id: ^menus.menuGroups.guid, menu_group_id: menus.menuGroups.guid}
+  key: [store_location_id, menu_id, menu_group_id, item_tag_id]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location', to: store_location_id,    type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: '$parent',   to: restaurant_id,        type: ID}
+    - {from: '$parent',   to: menu_last_synced_at,  type: TIMESTAMP_UTC}
+    - {from: '$parent',   to: restaurant_timezone,  type: TEXT}
+    - {from: '$parent',   to: menu_id,              type: ID}
+    - {from: '$parent',   to: menu_name,            type: TEXT}
+    - {from: '$parent',   to: menu_group_parent_id, type: ID}
+    - {from: '$parent',   to: menu_group_id,        type: ID}
+    - {from: '$index',    to: source_array_index,   type: TEXT}   # position of the row in its array, set by the walker
+    - {from: guid,        to: item_tag_id,          type: ID}
+    - {from: name,        to: item_tag_name,        type: TEXT}
+
+in_menus_menu_items:
+  source_entity: menus
+  row_path: [menus, 'menuGroups*', menuItems]
+  parents: {restaurant_id: restaurantGuid, menu_last_synced_at: lastUpdated, restaurant_timezone: restaurantTimeZone, menu_id: menus.guid, menu_name: menus.name, menu_group_id: menus.menuGroups.guid, menu_group_name: menus.menuGroups.name}
+  key: [store_location_id, menu_group_id, menu_item_id]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location',                               to: store_location_id,                                type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: '$parent',                                 to: restaurant_id,                                    type: ID}
+    - {from: '$parent',                                 to: menu_last_synced_at,                              type: TIMESTAMP_UTC}
+    - {from: '$parent',                                 to: restaurant_timezone,                              type: TEXT}
+    - {from: '$parent',                                 to: menu_id,                                          type: ID}
+    - {from: '$parent',                                 to: menu_name,                                        type: TEXT}
+    - {from: '$parent',                                 to: menu_group_id,                                    type: ID}
+    - {from: '$parent',                                 to: menu_group_name,                                  type: TEXT}
+    - {from: '$index',                                  to: source_array_index,                               type: TEXT}   # position of the row in its array, set by the walker
+    - {from: name,                                      to: menu_item_name,                                   type: TEXT}
+    - {from: posName,                                   to: menu_item_pos_name,                               type: TEXT}
+    - {from: guid,                                      to: menu_item_id,                                     type: ID}
+    - {from: multiLocationId,                           to: menu_item_multi_store_location_id,                type: TEXT}
+    - {from: masterId,                                  to: master_id,                                        type: TEXT}
+    - {from: description,                               to: menu_item_description,                            type: TEXT}
+    - {from: image,                                     to: menu_item_image_url,                              type: TEXT}
+    - {from: price,                                     to: menu_item_price,                                  type: NUMERIC}
+    - {from: pricingStrategy,                           to: menu_item_pricing_strategy,                       type: TEXT}
+    - {from: pricingRules,                              to: menu_item_pricing_rules,                          type: JSON_TEXT}
+    - {from: isDeferred,                                to: is_deferred_item,                                 type: BOOLEAN}
+    - {from: isDiscountable,                            to: is_discountable_item,                             type: BOOLEAN}
+    - {from: salesCategory.name,                        to: sales_category_name,                              type: TEXT}
+    - {from: salesCategory.guid,                        to: sales_category_id,                                type: ID}
+    - {from: salesCategory.plu,                         to: sales_category_price_lookup_code,                 type: TEXT}
+    - {from: plu,                                       to: menu_item_price_lookup_code,                      type: TEXT}
+    - {from: sku,                                       to: menu_item_sku,                                    type: TEXT}
+    - {from: calories,                                  to: menu_item_calories,                               type: NUMERIC}
+    - {from: unitOfMeasure,                             to: menu_item_unit_of_measure,                        type: TEXT}
+    - {from: kitchenName,                               to: menu_item_kitchen_name,                           type: TEXT}
+    - {from: prepTime,                                  to: menu_item_prep_time_minutes,                      type: TEXT}
+    - {from: contentAdvisories.alcohol.containsAlcohol, to: contains_alcohol,                                 type: TEXT}
+    - {from: guestCount,                                to: menu_item_serves_count,                           type: INT}
+    - {from: length,                                    to: menu_item_length,                                 type: INT}
+    - {from: width,                                     to: menu_item_width,                                  type: INT}
+    - {from: height,                                    to: menu_item_height,                                 type: INT}
+    - {from: weight,                                    to: menu_item_weight,                                 type: INT}
+    - {from: weightUnitOfMeasure,                       to: menu_item_weight_unit_of_measure,                 type: TEXT}
+    - {from: dimensionUnitOfMeasure,                    to: menu_item_dimension_unit_of_measure,              type: TEXT}
+    - {from: sortOrder,                                 to: menu_item_sort_order,                             type: INT}
+    - {from: isComboParent,                             to: is_combo_parent,                                  type: BOOLEAN}
+    - {from: taxInclusion,                              to: menu_item_tax_inclusion,                          type: TEXT}
+    - {from: posButtonColorLight,                       to: menu_item_pos_button_color_light,                 type: TEXT}
+    - {from: posButtonColorDark,                        to: menu_item_pos_button_color_dark,                  type: TEXT}
+    - {from: pricingRules.sizeSpecificPricingGuid,      to: menu_item_pricing_rules_size_specific_pricing_id, type: ID}
+    - {from: salesCategory,                             to: menu_item_sales_category_ref,                     type: JSON_TEXT}
+
+in_menus_menu_item_visibility:
+  source_entity: menus
+  row_path: [menus, 'menuGroups*', menuItems, visibility]
+  parents: {restaurant_id: restaurantGuid, menu_last_synced_at: lastUpdated, restaurant_timezone: restaurantTimeZone, menu_id: menus.guid, menu_name: menus.name, menu_group_id: menus.menuGroups.guid, menu_group_name: menus.menuGroups.name, menu_item_id: menus.menuGroups.menuItems.guid}
+  key: [store_location_id, menu_group_id, menu_item_id, visibility]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location', to: store_location_id,   type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: '$parent',   to: restaurant_id,       type: ID}
+    - {from: '$parent',   to: menu_last_synced_at, type: TIMESTAMP_UTC}
+    - {from: '$parent',   to: restaurant_timezone, type: TEXT}
+    - {from: '$parent',   to: menu_id,             type: ID}
+    - {from: '$parent',   to: menu_name,           type: TEXT}
+    - {from: '$parent',   to: menu_group_id,       type: ID}
+    - {from: '$parent',   to: menu_group_name,     type: TEXT}
+    - {from: '$parent',   to: menu_item_id,        type: ID}
+    - {from: '$index',    to: source_array_index,  type: TEXT}   # position of the row in its array, set by the walker
+    - {from: '$value',    to: visibility,          type: TEXT}
+
+in_menus_menu_item_tax_rate:
+  source_entity: menus
+  row_path: [menus, 'menuGroups*', menuItems, taxInfo]
+  parents: {restaurant_id: restaurantGuid, menu_last_synced_at: lastUpdated, restaurant_timezone: restaurantTimeZone, menu_id: menus.guid, menu_name: menus.name, menu_group_id: menus.menuGroups.guid, menu_group_name: menus.menuGroups.name, menu_item_id: menus.menuGroups.menuItems.guid}
+  key: [store_location_id, menu_group_id, menu_item_id, tax_rate_id]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location', to: store_location_id,   type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: '$parent',   to: restaurant_id,       type: ID}
+    - {from: '$parent',   to: menu_last_synced_at, type: TIMESTAMP_UTC}
+    - {from: '$parent',   to: restaurant_timezone, type: TEXT}
+    - {from: '$parent',   to: menu_id,             type: ID}
+    - {from: '$parent',   to: menu_name,           type: TEXT}
+    - {from: '$parent',   to: menu_group_id,       type: ID}
+    - {from: '$parent',   to: menu_group_name,     type: TEXT}
+    - {from: '$parent',   to: menu_item_id,        type: ID}
+    - {from: '$index',    to: source_array_index,  type: TEXT}   # position of the row in its array, set by the walker
+    - {from: '$value',    to: tax_rate_id,         type: ID}
+
+in_menus_menu_item_tag:
+  source_entity: menus
+  row_path: [menus, 'menuGroups*', menuItems, itemTags]
+  parents: {restaurant_id: restaurantGuid, menu_last_synced_at: lastUpdated, restaurant_timezone: restaurantTimeZone, menu_id: menus.guid, menu_name: menus.name, menu_group_id: menus.menuGroups.guid, menu_group_name: menus.menuGroups.name, menu_item_id: menus.menuGroups.menuItems.guid}
+  key: [store_location_id, menu_group_id, menu_item_id, item_tag_id]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location', to: store_location_id,   type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: '$parent',   to: restaurant_id,       type: ID}
+    - {from: '$parent',   to: menu_last_synced_at, type: TIMESTAMP_UTC}
+    - {from: '$parent',   to: restaurant_timezone, type: TEXT}
+    - {from: '$parent',   to: menu_id,             type: ID}
+    - {from: '$parent',   to: menu_name,           type: TEXT}
+    - {from: '$parent',   to: menu_group_id,       type: ID}
+    - {from: '$parent',   to: menu_group_name,     type: TEXT}
+    - {from: '$parent',   to: menu_item_id,        type: ID}
+    - {from: '$index',    to: source_array_index,  type: TEXT}   # position of the row in its array, set by the walker
+    - {from: guid,        to: item_tag_id,         type: ID}
+    - {from: name,        to: item_tag_name,       type: TEXT}
+
+in_menus_menu_item_portion:
+  source_entity: menus
+  row_path: [menus, 'menuGroups*', menuItems, portions]
+  parents: {restaurant_id: restaurantGuid, menu_last_synced_at: lastUpdated, restaurant_timezone: restaurantTimeZone, menu_id: menus.guid, menu_name: menus.name, menu_group_id: menus.menuGroups.guid, menu_group_name: menus.menuGroups.name, menu_item_id: menus.menuGroups.menuItems.guid}
+  key: [store_location_id, menu_group_id, menu_item_id, source_array_index]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location', to: store_location_id,   type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: '$parent',   to: restaurant_id,       type: ID}
+    - {from: '$parent',   to: menu_last_synced_at, type: TIMESTAMP_UTC}
+    - {from: '$parent',   to: restaurant_timezone, type: TEXT}
+    - {from: '$parent',   to: menu_id,             type: ID}
+    - {from: '$parent',   to: menu_name,           type: TEXT}
+    - {from: '$parent',   to: menu_group_id,       type: ID}
+    - {from: '$parent',   to: menu_group_name,     type: TEXT}
+    - {from: '$parent',   to: menu_item_id,        type: ID}
+    - {from: '$index',    to: source_array_index,  type: TEXT}   # position of the row in its array, set by the walker
+    - {from: '$value',    to: portion,             type: JSON_TEXT}   # always empty in the SOR export; element shape unknown, kept whole
+
+in_menus_menu_item_modifier_group_ref:
+  source_entity: menus
+  row_path: [menus, 'menuGroups*', menuItems, modifierGroupReferences]
+  parents: {restaurant_id: restaurantGuid, menu_last_synced_at: lastUpdated, restaurant_timezone: restaurantTimeZone, menu_id: menus.guid, menu_name: menus.name, menu_group_id: menus.menuGroups.guid, menu_group_name: menus.menuGroups.name, menu_item_id: menus.menuGroups.menuItems.guid}
+  key: [store_location_id, menu_group_id, menu_item_id, modifier_group_reference_id]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location', to: store_location_id,           type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: '$parent',   to: restaurant_id,               type: ID}
+    - {from: '$parent',   to: menu_last_synced_at,         type: TIMESTAMP_UTC}
+    - {from: '$parent',   to: restaurant_timezone,         type: TEXT}
+    - {from: '$parent',   to: menu_id,                     type: ID}
+    - {from: '$parent',   to: menu_name,                   type: TEXT}
+    - {from: '$parent',   to: menu_group_id,               type: ID}
+    - {from: '$parent',   to: menu_group_name,             type: TEXT}
+    - {from: '$parent',   to: menu_item_id,                type: ID}
+    - {from: '$index',    to: source_array_index,          type: TEXT}   # position of the row in its array, set by the walker
+    - {from: '$value',    to: modifier_group_reference_id, type: INT}   # referenceId key into modifierGroupReferences
+
+in_menus_menu_item_prep_station:
+  source_entity: menus
+  row_path: [menus, 'menuGroups*', menuItems, prepStations]
+  parents: {restaurant_id: restaurantGuid, menu_last_synced_at: lastUpdated, restaurant_timezone: restaurantTimeZone, menu_id: menus.guid, menu_name: menus.name, menu_group_id: menus.menuGroups.guid, menu_group_name: menus.menuGroups.name, menu_item_id: menus.menuGroups.menuItems.guid}
+  key: [store_location_id, menu_group_id, menu_item_id, prep_station_id]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location', to: store_location_id,   type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: '$parent',   to: restaurant_id,       type: ID}
+    - {from: '$parent',   to: menu_last_synced_at, type: TIMESTAMP_UTC}
+    - {from: '$parent',   to: restaurant_timezone, type: TEXT}
+    - {from: '$parent',   to: menu_id,             type: ID}
+    - {from: '$parent',   to: menu_name,           type: TEXT}
+    - {from: '$parent',   to: menu_group_id,       type: ID}
+    - {from: '$parent',   to: menu_group_name,     type: TEXT}
+    - {from: '$parent',   to: menu_item_id,        type: ID}
+    - {from: '$index',    to: source_array_index,  type: TEXT}   # position of the row in its array, set by the walker
+    - {from: '$value',    to: prep_station_id,     type: ID}
+
+in_menus_menu_item_image:
+  source_entity: menus
+  row_path: [menus, 'menuGroups*', menuItems, images]
+  parents: {restaurant_id: restaurantGuid, menu_last_synced_at: lastUpdated, restaurant_timezone: restaurantTimeZone, menu_id: menus.guid, menu_name: menus.name, menu_group_id: menus.menuGroups.guid, menu_group_name: menus.menuGroups.name, menu_item_id: menus.menuGroups.menuItems.guid}
+  key: [store_location_id, menu_group_id, menu_item_id, source_array_index]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location', to: store_location_id,   type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: '$parent',   to: restaurant_id,       type: ID}
+    - {from: '$parent',   to: menu_last_synced_at, type: TIMESTAMP_UTC}
+    - {from: '$parent',   to: restaurant_timezone, type: TEXT}
+    - {from: '$parent',   to: menu_id,             type: ID}
+    - {from: '$parent',   to: menu_name,           type: TEXT}
+    - {from: '$parent',   to: menu_group_id,       type: ID}
+    - {from: '$parent',   to: menu_group_name,     type: TEXT}
+    - {from: '$parent',   to: menu_item_id,        type: ID}
+    - {from: '$index',    to: source_array_index,  type: TEXT}   # position of the row in its array, set by the walker
+    - {from: '$value',    to: image,               type: JSON_TEXT}   # always empty in the SOR export; element shape unknown, kept whole
+
+in_menus_menu_item_allergen:
+  source_entity: menus
+  row_path: [menus, 'menuGroups*', menuItems, allergens]
+  parents: {restaurant_id: restaurantGuid, menu_last_synced_at: lastUpdated, restaurant_timezone: restaurantTimeZone, menu_id: menus.guid, menu_name: menus.name, menu_group_id: menus.menuGroups.guid, menu_group_name: menus.menuGroups.name, menu_item_id: menus.menuGroups.menuItems.guid}
+  key: [store_location_id, menu_group_id, menu_item_id, allergen_id]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location',  to: store_location_id,      type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: '$parent',    to: restaurant_id,          type: ID}
+    - {from: '$parent',    to: menu_last_synced_at,    type: TIMESTAMP_UTC}
+    - {from: '$parent',    to: restaurant_timezone,    type: TEXT}
+    - {from: '$parent',    to: menu_id,                type: ID}
+    - {from: '$parent',    to: menu_name,              type: TEXT}
+    - {from: '$parent',    to: menu_group_id,          type: ID}
+    - {from: '$parent',    to: menu_group_name,        type: TEXT}
+    - {from: '$parent',    to: menu_item_id,           type: ID}
+    - {from: '$index',     to: source_array_index,     type: TEXT}   # position of the row in its array, set by the walker
+    - {from: guid,         to: allergen_id,            type: ID}
+    - {from: code,         to: allergen_code,          type: TEXT}
+    - {from: groupGuid,    to: allergen_group_id,      type: ID}
+    - {from: groupCode,    to: allergen_group_code,    type: TEXT}
+    - {from: presenceType, to: allergen_presence_type, type: TEXT}
+
+in_menus_menu_item_payment_assistance:
+  source_entity: menus
+  row_path: [menus, 'menuGroups*', menuItems, eligiblePaymentAssistancePrograms]
+  parents: {restaurant_id: restaurantGuid, menu_last_synced_at: lastUpdated, restaurant_timezone: restaurantTimeZone, menu_id: menus.guid, menu_name: menus.name, menu_group_id: menus.menuGroups.guid, menu_group_name: menus.menuGroups.name, menu_item_id: menus.menuGroups.menuItems.guid}
+  key: [store_location_id, menu_group_id, menu_item_id, source_array_index]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location', to: store_location_id,          type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: '$parent',   to: restaurant_id,              type: ID}
+    - {from: '$parent',   to: menu_last_synced_at,        type: TIMESTAMP_UTC}
+    - {from: '$parent',   to: restaurant_timezone,        type: TEXT}
+    - {from: '$parent',   to: menu_id,                    type: ID}
+    - {from: '$parent',   to: menu_name,                  type: TEXT}
+    - {from: '$parent',   to: menu_group_id,              type: ID}
+    - {from: '$parent',   to: menu_group_name,            type: TEXT}
+    - {from: '$parent',   to: menu_item_id,               type: ID}
+    - {from: '$index',    to: source_array_index,         type: TEXT}   # position of the row in its array, set by the walker
+    - {from: '$value',    to: payment_assistance_program, type: JSON_TEXT}   # always empty in the SOR export; element shape unknown, kept whole
+
+in_menus_menu_item_time_price:
+  source_entity: menus
+  row_path: [menus, 'menuGroups*', menuItems, pricingRules.timeSpecificPricingRules]
+  parents: {restaurant_id: restaurantGuid, menu_last_synced_at: lastUpdated, restaurant_timezone: restaurantTimeZone, menu_id: menus.guid, menu_name: menus.name, menu_group_id: menus.menuGroups.guid, menu_group_name: menus.menuGroups.name, menu_item_id: menus.menuGroups.menuItems.guid}
+  key: [store_location_id, menu_group_id, menu_item_id, source_array_index]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location',       to: store_location_id,   type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: '$parent',         to: restaurant_id,       type: ID}
+    - {from: '$parent',         to: menu_last_synced_at, type: TIMESTAMP_UTC}
+    - {from: '$parent',         to: restaurant_timezone, type: TEXT}
+    - {from: '$parent',         to: menu_id,             type: ID}
+    - {from: '$parent',         to: menu_name,           type: TEXT}
+    - {from: '$parent',         to: menu_group_id,       type: ID}
+    - {from: '$parent',         to: menu_group_name,     type: TEXT}
+    - {from: '$parent',         to: menu_item_id,        type: ID}
+    - {from: '$index',          to: source_array_index,  type: TEXT}   # position of the row in its array, set by the walker
+    - {from: timeSpecificPrice, to: time_specific_price, type: NUMERIC}
+    - {from: basePrice,         to: base_price,          type: NUMERIC}
+
+in_menus_menu_item_size_sequence_price:
+  source_entity: menus
+  row_path: [menus, 'menuGroups*', menuItems, pricingRules.sizeSequencePricingRules]
+  parents: {restaurant_id: restaurantGuid, menu_last_synced_at: lastUpdated, restaurant_timezone: restaurantTimeZone, menu_id: menus.guid, menu_name: menus.name, menu_group_id: menus.menuGroups.guid, menu_group_name: menus.menuGroups.name, menu_item_id: menus.menuGroups.menuItems.guid}
+  key: [store_location_id, menu_group_id, menu_item_id, source_array_index]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location', to: store_location_id,          type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: '$parent',   to: restaurant_id,              type: ID}
+    - {from: '$parent',   to: menu_last_synced_at,        type: TIMESTAMP_UTC}
+    - {from: '$parent',   to: restaurant_timezone,        type: TEXT}
+    - {from: '$parent',   to: menu_id,                    type: ID}
+    - {from: '$parent',   to: menu_name,                  type: TEXT}
+    - {from: '$parent',   to: menu_group_id,              type: ID}
+    - {from: '$parent',   to: menu_group_name,            type: TEXT}
+    - {from: '$parent',   to: menu_item_id,               type: ID}
+    - {from: '$index',    to: source_array_index,         type: TEXT}   # position of the row in its array, set by the walker
+    - {from: '$value',    to: size_sequence_pricing_rule, type: JSON_TEXT}   # always empty in the SOR export; element shape unknown, kept whole
+
+in_menus_menu_item_time_price_day:
+  source_entity: menus
+  row_path: [menus, 'menuGroups*', menuItems, pricingRules.timeSpecificPricingRules, schedule, days]
+  parents: {restaurant_id: restaurantGuid, menu_last_synced_at: lastUpdated, restaurant_timezone: restaurantTimeZone, menu_id: menus.guid, menu_name: menus.name, menu_group_id: menus.menuGroups.guid, menu_group_name: menus.menuGroups.name, menu_item_id: menus.menuGroups.menuItems.guid, time_price_index: menus.menuGroups.menuItems.pricingRules.timeSpecificPricingRules.$index, schedule_index: menus.menuGroups.menuItems.pricingRules.timeSpecificPricingRules.schedule.$index}
+  key: [store_location_id, menu_group_id, menu_item_id, time_price_index, schedule_index, day_of_week]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location', to: store_location_id,   type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: '$parent',   to: restaurant_id,       type: ID}
+    - {from: '$parent',   to: menu_last_synced_at, type: TIMESTAMP_UTC}
+    - {from: '$parent',   to: restaurant_timezone, type: TEXT}
+    - {from: '$parent',   to: menu_id,             type: ID}
+    - {from: '$parent',   to: menu_name,           type: TEXT}
+    - {from: '$parent',   to: menu_group_id,       type: ID}
+    - {from: '$parent',   to: menu_group_name,     type: TEXT}
+    - {from: '$parent',   to: menu_item_id,        type: ID}
+    - {from: '$parent',   to: time_price_index,    type: INT}
+    - {from: '$parent',   to: schedule_index,      type: INT}
+    - {from: '$index',    to: source_array_index,  type: TEXT}   # position of the row in its array, set by the walker
+    - {from: '$value',    to: day_of_week,         type: TEXT}
+
+in_menus_menu_item_time_price_range:
+  source_entity: menus
+  row_path: [menus, 'menuGroups*', menuItems, pricingRules.timeSpecificPricingRules, schedule, timeRanges]
+  parents: {restaurant_id: restaurantGuid, menu_last_synced_at: lastUpdated, restaurant_timezone: restaurantTimeZone, menu_id: menus.guid, menu_name: menus.name, menu_group_id: menus.menuGroups.guid, menu_group_name: menus.menuGroups.name, menu_item_id: menus.menuGroups.menuItems.guid, time_price_index: menus.menuGroups.menuItems.pricingRules.timeSpecificPricingRules.$index, schedule_index: menus.menuGroups.menuItems.pricingRules.timeSpecificPricingRules.schedule.$index}
+  key: [store_location_id, menu_group_id, menu_item_id, time_price_index, schedule_index, source_array_index]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location', to: store_location_id,   type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: '$parent',   to: restaurant_id,       type: ID}
+    - {from: '$parent',   to: menu_last_synced_at, type: TIMESTAMP_UTC}
+    - {from: '$parent',   to: restaurant_timezone, type: TEXT}
+    - {from: '$parent',   to: menu_id,             type: ID}
+    - {from: '$parent',   to: menu_name,           type: TEXT}
+    - {from: '$parent',   to: menu_group_id,       type: ID}
+    - {from: '$parent',   to: menu_group_name,     type: TEXT}
+    - {from: '$parent',   to: menu_item_id,        type: ID}
+    - {from: '$parent',   to: time_price_index,    type: INT}
+    - {from: '$parent',   to: schedule_index,      type: INT}
+    - {from: '$index',    to: source_array_index,  type: TEXT}   # position of the row in its array, set by the walker
+    - {from: start,       to: start_time_local,    type: TEXT}
+    - {from: end,         to: end_time_local,      type: TEXT}
+
+in_menus_modifier_group_refs:
+  source_entity: menus
+  row_path: ['modifierGroupReferences{}']
+  parents: {restaurant_id: restaurantGuid, menu_last_synced_at: lastUpdated, restaurant_timezone: restaurantTimeZone}
+  key: [store_location_id, modifier_group_reference_key]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location',                       to: store_location_id,                      type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: '$parent',                         to: restaurant_id,                          type: ID}
+    - {from: '$parent',                         to: menu_last_synced_at,                    type: TIMESTAMP_UTC}
+    - {from: '$parent',                         to: restaurant_timezone,                    type: TEXT}
+    - {from: '$key',                            to: modifier_group_reference_key,           type: TEXT}   # map key (equals referenceId)
+    - {from: referenceId,                       to: partner_reference_id,                   type: INT}
+    - {from: name,                              to: modifier_group_name,                    type: TEXT}
+    - {from: posName,                           to: modifier_group_pos_name,                type: TEXT}
+    - {from: guid,                              to: modifier_group_id,                      type: ID}
+    - {from: multiLocationId,                   to: modifier_group_multi_store_location_id, type: TEXT}
+    - {from: masterId,                          to: master_id,                              type: TEXT}
+    - {from: pricingStrategy,                   to: modifier_group_pricing_strategy,        type: TEXT}
+    - {from: pricingRules,                      to: modifier_group_pricing_rules,           type: JSON_TEXT}
+    - {from: defaultOptionsChargePrice,         to: is_default_options_charge_price,        type: TEXT}
+    - {from: defaultOptionsSubstitutionPricing, to: default_options_substitution_pricing,   type: TEXT}
+    - {from: minSelections,                     to: modifier_group_min_selections,          type: INT}
+    - {from: maxSelections,                     to: modifier_group_max_selections,          type: INT}
+    - {from: requiredMode,                      to: is_required,                            type: TEXT}
+    - {from: isMultiSelect,                     to: is_multi_item,                          type: BOOLEAN}
+    - {from: preModifierGroupReference,         to: pre_modifier_group_id,                  type: JSON_TEXT}
+    - {from: posButtonColorLight,               to: modifier_group_pos_button_color_light,  type: TEXT}
+    - {from: posButtonColorDark,                to: modifier_group_pos_button_color_dark,   type: TEXT}
+
+in_menus_modifier_group_visibility:
+  source_entity: menus
+  row_path: ['modifierGroupReferences{}', visibility]
+  parents: {restaurant_id: restaurantGuid, menu_last_synced_at: lastUpdated, restaurant_timezone: restaurantTimeZone, modifier_group_reference_key: modifierGroupReferences.$key}
+  key: [store_location_id, modifier_group_reference_key, visibility]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location', to: store_location_id,            type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: '$parent',   to: restaurant_id,                type: ID}
+    - {from: '$parent',   to: menu_last_synced_at,          type: TIMESTAMP_UTC}
+    - {from: '$parent',   to: restaurant_timezone,          type: TEXT}
+    - {from: '$parent',   to: modifier_group_reference_key, type: TEXT}
+    - {from: '$index',    to: source_array_index,           type: TEXT}   # position of the row in its array, set by the walker
+    - {from: '$value',    to: visibility,                   type: TEXT}
+
+in_menus_modifier_group_option_ref:
+  source_entity: menus
+  row_path: ['modifierGroupReferences{}', modifierOptionReferences]
+  parents: {restaurant_id: restaurantGuid, menu_last_synced_at: lastUpdated, restaurant_timezone: restaurantTimeZone, modifier_group_reference_key: modifierGroupReferences.$key}
+  key: [store_location_id, modifier_group_reference_key, modifier_option_reference_id]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location', to: store_location_id,            type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: '$parent',   to: restaurant_id,                type: ID}
+    - {from: '$parent',   to: menu_last_synced_at,          type: TIMESTAMP_UTC}
+    - {from: '$parent',   to: restaurant_timezone,          type: TEXT}
+    - {from: '$parent',   to: modifier_group_reference_key, type: TEXT}
+    - {from: '$index',    to: source_array_index,           type: TEXT}   # position of the row in its array, set by the walker
+    - {from: '$value',    to: modifier_option_reference_id, type: INT}   # referenceId key into modifierOptionReferences
+
+in_config_modifier_option:
+  source_entity: menus
+  row_path: ['modifierOptionReferences{}']
+  parents: {restaurant_id: restaurantGuid, menu_last_synced_at: lastUpdated, restaurant_timezone: restaurantTimeZone}
+  key: [store_location_id, modifier_option_reference_key]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location',                                to: store_location_id,                         type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: '$parent',                                  to: restaurant_id,                             type: ID}
+    - {from: '$parent',                                  to: menu_last_synced_at,                       type: TIMESTAMP_UTC}
+    - {from: '$parent',                                  to: restaurant_timezone,                       type: TEXT}
+    - {from: '$key',                                     to: modifier_option_reference_key,             type: TEXT}   # map key (equals referenceId)
+    - {from: referenceId,                                to: reference_id,                              type: INT}
+    - {from: name,                                       to: modifier_option_name,                      type: TEXT}
+    - {from: posName,                                    to: modifier_option_pos_name,                  type: TEXT}
+    - {from: guid,                                       to: modifier_option_id,                        type: ID}
+    - {from: multiLocationId,                            to: modifier_option_multi_store_location_id,   type: TEXT}
+    - {from: masterId,                                   to: modifier_option_master_id,                 type: TEXT}
+    - {from: description,                                to: modifier_option_description,               type: TEXT}
+    - {from: image,                                      to: modifier_option_image_url,                 type: TEXT}
+    - {from: price,                                      to: modifier_option_price,                     type: NUMERIC}
+    - {from: pricingStrategy,                            to: modifier_option_pricing_strategy,          type: TEXT}
+    - {from: pricingRules,                               to: modifier_option_pricing_rules,             type: JSON_TEXT}
+    - {from: salesCategory.name,                         to: sales_category_name,                       type: TEXT}
+    - {from: salesCategory.guid,                         to: sales_category_id,                         type: ID}
+    - {from: salesCategory.plu,                          to: sales_category_price_lookup_code,          type: TEXT}
+    - {from: modifierOptionTaxInfo.overrideItemTaxRates, to: is_tax_override_of_item,                   type: BOOLEAN}
+    - {from: plu,                                        to: modifier_option_price_lookup_code,         type: TEXT}
+    - {from: sku,                                        to: modifier_option_sku,                       type: TEXT}
+    - {from: kitchenName,                                to: modifier_option_kitchen_name,              type: TEXT}
+    - {from: calories,                                   to: modifier_option_calories,                  type: NUMERIC}
+    - {from: unitOfMeasure,                              to: modifier_option_unit_of_measure,           type: TEXT}
+    - {from: isDefault,                                  to: is_default_item,                           type: BOOLEAN}
+    - {from: allowsDuplicates,                           to: is_allow_duplicate_modifier_options,       type: BOOLEAN}
+    - {from: prepTime,                                   to: modifier_option_prep_time_minutes,         type: TEXT}
+    - {from: contentAdvisories.alcohol.containsAlcohol,  to: contains_alcohol,                          type: TEXT}
+    - {from: guestCount,                                 to: modifier_option_serves_count,              type: INT}
+    - {from: length,                                     to: modifier_option_length,                    type: INT}
+    - {from: width,                                      to: modifier_option_width,                     type: INT}
+    - {from: height,                                     to: modifier_option_height,                    type: INT}
+    - {from: weight,                                     to: modifier_option_weight,                    type: INT}
+    - {from: weightUnitOfMeasure,                        to: modifier_option_weight_unit_of_measure,    type: TEXT}
+    - {from: dimensionUnitOfMeasure,                     to: modifier_option_dimension_unit_of_measure, type: TEXT}
+    - {from: sortOrder,                                  to: modifier_option_sort_order,                type: INT}
+    - {from: posButtonColorLight,                        to: modifier_option_pos_button_color_light,    type: TEXT}
+    - {from: posButtonColorDark,                         to: modifier_option_pos_button_color_dark,     type: TEXT}
+    - {from: salesCategory,                              to: modifier_option_sales_category_ref,        type: JSON_TEXT}
+
+in_menus_modifier_option_visibility:
+  source_entity: menus
+  row_path: ['modifierOptionReferences{}', visibility]
+  parents: {restaurant_id: restaurantGuid, menu_last_synced_at: lastUpdated, restaurant_timezone: restaurantTimeZone, modifier_option_reference_key: modifierOptionReferences.$key}
+  key: [store_location_id, modifier_option_reference_key, visibility]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location', to: store_location_id,             type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: '$parent',   to: restaurant_id,                 type: ID}
+    - {from: '$parent',   to: menu_last_synced_at,           type: TIMESTAMP_UTC}
+    - {from: '$parent',   to: restaurant_timezone,           type: TEXT}
+    - {from: '$parent',   to: modifier_option_reference_key, type: TEXT}
+    - {from: '$index',    to: source_array_index,            type: TEXT}   # position of the row in its array, set by the walker
+    - {from: '$value',    to: visibility,                    type: TEXT}
+
+in_menus_modifier_option_tax_rate:
+  source_entity: menus
+  row_path: ['modifierOptionReferences{}', taxInfo]
+  parents: {restaurant_id: restaurantGuid, menu_last_synced_at: lastUpdated, restaurant_timezone: restaurantTimeZone, modifier_option_reference_key: modifierOptionReferences.$key}
+  key: [store_location_id, modifier_option_reference_key, tax_rate_id]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location', to: store_location_id,             type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: '$parent',   to: restaurant_id,                 type: ID}
+    - {from: '$parent',   to: menu_last_synced_at,           type: TIMESTAMP_UTC}
+    - {from: '$parent',   to: restaurant_timezone,           type: TEXT}
+    - {from: '$parent',   to: modifier_option_reference_key, type: TEXT}
+    - {from: '$index',    to: source_array_index,            type: TEXT}   # position of the row in its array, set by the walker
+    - {from: '$value',    to: tax_rate_id,                   type: ID}
+
+in_menus_modifier_option_tax_override:
+  source_entity: menus
+  row_path: ['modifierOptionReferences{}', modifierOptionTaxInfo.taxRateGuids]
+  parents: {restaurant_id: restaurantGuid, menu_last_synced_at: lastUpdated, restaurant_timezone: restaurantTimeZone, modifier_option_reference_key: modifierOptionReferences.$key}
+  key: [store_location_id, modifier_option_reference_key, tax_rate_id]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location', to: store_location_id,             type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: '$parent',   to: restaurant_id,                 type: ID}
+    - {from: '$parent',   to: menu_last_synced_at,           type: TIMESTAMP_UTC}
+    - {from: '$parent',   to: restaurant_timezone,           type: TEXT}
+    - {from: '$parent',   to: modifier_option_reference_key, type: TEXT}
+    - {from: '$index',    to: source_array_index,            type: TEXT}   # position of the row in its array, set by the walker
+    - {from: '$value',    to: tax_rate_id,                   type: ID}
+
+in_menus_modifier_option_tag:
+  source_entity: menus
+  row_path: ['modifierOptionReferences{}', itemTags]
+  parents: {restaurant_id: restaurantGuid, menu_last_synced_at: lastUpdated, restaurant_timezone: restaurantTimeZone, modifier_option_reference_key: modifierOptionReferences.$key}
+  key: [store_location_id, modifier_option_reference_key, item_tag_id]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location', to: store_location_id,             type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: '$parent',   to: restaurant_id,                 type: ID}
+    - {from: '$parent',   to: menu_last_synced_at,           type: TIMESTAMP_UTC}
+    - {from: '$parent',   to: restaurant_timezone,           type: TEXT}
+    - {from: '$parent',   to: modifier_option_reference_key, type: TEXT}
+    - {from: '$index',    to: source_array_index,            type: TEXT}   # position of the row in its array, set by the walker
+    - {from: guid,        to: item_tag_id,                   type: ID}
+    - {from: name,        to: item_tag_name,                 type: TEXT}
+
+in_menus_modifier_option_portion:
+  source_entity: menus
+  row_path: ['modifierOptionReferences{}', portions]
+  parents: {restaurant_id: restaurantGuid, menu_last_synced_at: lastUpdated, restaurant_timezone: restaurantTimeZone, modifier_option_reference_key: modifierOptionReferences.$key}
+  key: [store_location_id, modifier_option_reference_key, source_array_index]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location', to: store_location_id,             type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: '$parent',   to: restaurant_id,                 type: ID}
+    - {from: '$parent',   to: menu_last_synced_at,           type: TIMESTAMP_UTC}
+    - {from: '$parent',   to: restaurant_timezone,           type: TEXT}
+    - {from: '$parent',   to: modifier_option_reference_key, type: TEXT}
+    - {from: '$index',    to: source_array_index,            type: TEXT}   # position of the row in its array, set by the walker
+    - {from: '$value',    to: portion,                       type: JSON_TEXT}   # always empty in the SOR export; element shape unknown, kept whole
+
+in_menus_modifier_option_modifier_group_ref:
+  source_entity: menus
+  row_path: ['modifierOptionReferences{}', modifierGroupReferences]
+  parents: {restaurant_id: restaurantGuid, menu_last_synced_at: lastUpdated, restaurant_timezone: restaurantTimeZone, modifier_option_reference_key: modifierOptionReferences.$key}
+  key: [store_location_id, modifier_option_reference_key, modifier_group_reference_id]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location', to: store_location_id,             type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: '$parent',   to: restaurant_id,                 type: ID}
+    - {from: '$parent',   to: menu_last_synced_at,           type: TIMESTAMP_UTC}
+    - {from: '$parent',   to: restaurant_timezone,           type: TEXT}
+    - {from: '$parent',   to: modifier_option_reference_key, type: TEXT}
+    - {from: '$index',    to: source_array_index,            type: TEXT}   # position of the row in its array, set by the walker
+    - {from: '$value',    to: modifier_group_reference_id,   type: INT}
+
+in_menus_modifier_option_prep_station:
+  source_entity: menus
+  row_path: ['modifierOptionReferences{}', prepStations]
+  parents: {restaurant_id: restaurantGuid, menu_last_synced_at: lastUpdated, restaurant_timezone: restaurantTimeZone, modifier_option_reference_key: modifierOptionReferences.$key}
+  key: [store_location_id, modifier_option_reference_key, prep_station_id]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location', to: store_location_id,             type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: '$parent',   to: restaurant_id,                 type: ID}
+    - {from: '$parent',   to: menu_last_synced_at,           type: TIMESTAMP_UTC}
+    - {from: '$parent',   to: restaurant_timezone,           type: TEXT}
+    - {from: '$parent',   to: modifier_option_reference_key, type: TEXT}
+    - {from: '$index',    to: source_array_index,            type: TEXT}   # position of the row in its array, set by the walker
+    - {from: '$value',    to: prep_station_id,               type: ID}
+
+in_menus_modifier_option_allergen:
+  source_entity: menus
+  row_path: ['modifierOptionReferences{}', allergens]
+  parents: {restaurant_id: restaurantGuid, menu_last_synced_at: lastUpdated, restaurant_timezone: restaurantTimeZone, modifier_option_reference_key: modifierOptionReferences.$key}
+  key: [store_location_id, modifier_option_reference_key, allergen_id]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location',  to: store_location_id,             type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: '$parent',    to: restaurant_id,                 type: ID}
+    - {from: '$parent',    to: menu_last_synced_at,           type: TIMESTAMP_UTC}
+    - {from: '$parent',    to: restaurant_timezone,           type: TEXT}
+    - {from: '$parent',    to: modifier_option_reference_key, type: TEXT}
+    - {from: '$index',     to: source_array_index,            type: TEXT}   # position of the row in its array, set by the walker
+    - {from: guid,         to: allergen_id,                   type: ID}
+    - {from: code,         to: allergen_code,                 type: TEXT}
+    - {from: groupGuid,    to: allergen_group_id,             type: ID}
+    - {from: groupCode,    to: allergen_group_code,           type: TEXT}
+    - {from: presenceType, to: allergen_presence_type,        type: TEXT}
+
+in_menus_pre_modifier_group_refs:
+  source_entity: menus
+  row_path: ['preModifierGroupReferences{}']
+  parents: {restaurant_id: restaurantGuid, menu_last_synced_at: lastUpdated, restaurant_timezone: restaurantTimeZone}
+  key: [store_location_id, pre_modifier_group_reference_key]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location', to: store_location_id,                type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: '$parent',   to: restaurant_id,                    type: ID}
+    - {from: '$parent',   to: menu_last_synced_at,              type: TIMESTAMP_UTC}
+    - {from: '$parent',   to: restaurant_timezone,              type: TEXT}
+    - {from: '$key',      to: pre_modifier_group_reference_key, type: TEXT}   # map key (referenceId)
+    - {from: '$value',    to: pre_modifier_group,               type: JSON_TEXT}   # in the Toast docs, not in the SOR export; kept whole
+
+in_location_online_status:
+  source_entity: availability
+  row_path: []   # each line is one record
+  key: [store_location_id]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: restaurantGuid, to: restaurant_id,           type: ID}
+    - {from: status,         to: availability_status,     type: TEXT}
+    - {from: reasonKey,      to: availability_reason_key, type: TEXT}
+    - {from: reason,         to: availability_reason,     type: TEXT}
+    - {from: '$location',    to: store_location_id,       type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+
+in_location:
+  source_entity: restaurants
+  row_path: []   # each line is one record
+  key: [store_location_id, location_guid]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: guid,                                             to: location_guid,                                        type: ID}
+    - {from: general.name,                                     to: brand_name,                                           type: TEXT}
+    - {from: general.locationName,                             to: location_name,                                        type: TEXT}
+    - {from: general.locationCode,                             to: location_code,                                        type: TEXT}
+    - {from: general.description,                              to: location_description,                                 type: TEXT}
+    - {from: general.timeZone,                                 to: restaurant_location_timezone,                         type: TEXT}
+    - {from: general.closeoutHour,                             to: closeout_hour,                                        type: INT}
+    - {from: general.managementGroupGuid,                      to: management_group_id,                                  type: ID}
+    - {from: general.currencyCode,                             to: currency_code,                                        type: TEXT}
+    - {from: general.firstBusinessDate,                        to: restaurant_first_business_date,                       type: DATE_INT}
+    - {from: general.archived,                                 to: is_archived,                                          type: BOOLEAN}
+    - {from: urls.website,                                     to: website_url,                                          type: TEXT}
+    - {from: urls.facebook,                                    to: facebook_url,                                         type: TEXT}
+    - {from: urls.twitter,                                     to: twitter_url,                                          type: TEXT}
+    - {from: urls.orderOnline,                                 to: order_online_url,                                     type: TEXT}
+    - {from: urls.purchaseGiftCard,                            to: purchase_gift_card_url,                               type: TEXT}
+    - {from: urls.checkGiftCard,                               to: check_gift_card_url,                                  type: TEXT}
+    - {from: '$location',                                      to: store_location_id,                                    type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: delivery.enabled,                                 to: is_delivery_enabled,                                  type: BOOLEAN}
+    - {from: delivery.minimum,                                 to: delivery_minimum_amount,                              type: NUMERIC}   # money is always NUMERIC
+    - {from: delivery.area,                                    to: delivery_area,                                        type: TEXT}
+    - {from: onlineOrdering.enabled,                           to: is_online_ordering_enabled,                           type: BOOLEAN}
+    - {from: onlineOrdering.scheduling,                        to: is_online_ordering_enabled_scheduling,                type: BOOLEAN}
+    - {from: onlineOrdering.specialRequests,                   to: is_online_ordering_special_requests_enabled,          type: BOOLEAN}
+    - {from: onlineOrdering.specialRequestsMessage,            to: online_ordering_special_requests_message,             type: TEXT}
+    - {from: onlineOrdering.paymentOptions.delivery.cash,      to: online_ordering_accepts_cash_delivery,                type: BOOLEAN}
+    - {from: onlineOrdering.paymentOptions.delivery.ccSameDay, to: online_ordering_payment_options_delivery_cc_same_day, type: BOOLEAN}
+    - {from: onlineOrdering.paymentOptions.delivery.ccFuture,  to: online_ordering_payment_options_delivery_cc_future,   type: BOOLEAN}
+    - {from: onlineOrdering.paymentOptions.takeout.cash,       to: online_ordering_accepts_cash_takeout,                 type: BOOLEAN}
+    - {from: onlineOrdering.paymentOptions.takeout.ccSameDay,  to: online_ordering_payment_options_takeout_cc_same_day,  type: BOOLEAN}
+    - {from: onlineOrdering.paymentOptions.takeout.ccFuture,   to: online_ordering_payment_options_takeout_cc_future,    type: BOOLEAN}
+    - {from: onlineOrdering.paymentOptions.takeout.ccInStore,  to: online_ordering_payment_options_takeout_cc_in_store,  type: BOOLEAN}
+    - {from: onlineOrdering.paymentOptions.ccTip,              to: online_ordering_allows_cc_tip,                        type: BOOLEAN}
+    - {from: prepTimes.deliveryPrepTime,                       to: delivery_prep_minutes,                                type: INT}
+    - {from: prepTimes.deliveryTimeAfterOpen,                  to: prep_times_delivery_time_after_open,                  type: INT}
+    - {from: prepTimes.deliveryTimeBeforeClose,                to: prep_times_delivery_time_before_close,                type: INT}
+    - {from: prepTimes.takeoutPrepTime,                        to: takeout_prep_minutes,                                 type: INT}
+    - {from: prepTimes.takeoutTimeAfterOpen,                   to: prep_times_takeout_time_after_open,                   type: INT}
+    - {from: prepTimes.takeoutTimeBeforeClose,                 to: prep_times_takeout_time_before_close,                 type: INT}
+    - {from: prepTimes.takeoutThrottlingTime,                  to: prep_times_takeout_throttling_time,                   type: INT}
+    - {from: prepTimes.deliveryThrottlingTime,                 to: prep_times_delivery_throttling_time,                  type: INT}
+    - {from: location,                                         to: restaurant_address,                                   type: JSON_TEXT}   # Toast's own location (address) object, in the Toast docs; the SOR export's 'location' column is the exporter's name instead
+
+in_restaurant_day_schedule:
+  source_entity: restaurants
+  row_path: ['schedules.daySchedules{}']
+  parents: {restaurant_id: guid}
+  key: [store_location_id, restaurant_id, day_schedule_id]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location',  to: store_location_id,        type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: '$parent',    to: restaurant_id,            type: ID}
+    - {from: '$key',       to: day_schedule_id,          type: TEXT}   # map key of schedules.daySchedules
+    - {from: scheduleName, to: day_schedule_name,        type: TEXT}
+    - {from: openTime,     to: open_time_localtimezone,  type: TEXT}
+    - {from: closeTime,    to: close_time_localtimezone, type: TEXT}
+
+in_restaurant_service_window:
+  source_entity: restaurants
+  row_path: ['schedules.daySchedules{}', services]
+  parents: {restaurant_id: guid, day_schedule_id: schedules.daySchedules.$key, day_schedule_name: schedules.daySchedules.scheduleName}
+  key: [store_location_id, restaurant_id, day_schedule_id, source_array_index]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location',     to: store_location_id,        type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: '$parent',       to: restaurant_id,            type: ID}
+    - {from: '$parent',       to: day_schedule_id,          type: TEXT}
+    - {from: '$parent',       to: day_schedule_name,        type: TEXT}
+    - {from: '$index',        to: source_array_index,       type: TEXT}   # position of the row in its array, set by the walker
+    - {from: name,            to: service_window_name,      type: TEXT}
+    - {from: hours.startTime, to: start_time_localtimezone, type: TEXT}
+    - {from: hours.endTime,   to: end_time_localtimezone,   type: TEXT}
+    - {from: overnight,       to: is_overnight_service,     type: BOOLEAN}
+
+in_restaurant_week_schedule:
+  source_entity: restaurants
+  row_path: ['schedules.weekSchedule{}']
+  parents: {restaurant_id: guid}
+  key: [store_location_id, restaurant_id, day_of_week]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location', to: store_location_id, type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: '$parent',   to: restaurant_id,     type: ID}
+    - {from: '$key',      to: day_of_week,       type: TEXT}   # map key: monday ... sunday
+    - {from: '$value',    to: day_schedule_id,   type: TEXT}   # day schedule id; null = closed that day
+
+in_restaurant_group_xref:
+  source_entity: null   # not a separate entity in the ETL catalog - CHECK
+  row_path: null   # TODO: nesting inside the response is not described and no raw sample is available
+  key: [store_location_id, management_group_id, restaurant_id]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location',         to: store_location_id,   type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: managementGroupGuid, to: management_group_id, type: ID}
+    - {from: guid,                to: restaurant_id,       type: ID}
+
+in_kitchen_prep_station:
+  source_entity: prep_stations
+  row_path: []   # each line is one record
+  key: [store_location_id, prep_station_id]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: entityType,                to: entity_type,                 type: TEXT}
+    - {from: connectedPrepStations,     to: connected_prep_stations,     type: JSON_TEXT}   # always empty in the SOR export; element shape unknown, kept whole
+    - {from: printingMode,              to: printing_mode,               type: TEXT}
+    - {from: includeWithExpediter,      to: include_with_expediter,      type: BOOLEAN}
+    - {from: expoRouting,               to: expo_routing,                type: TEXT}
+    - {from: name,                      to: prep_station_name,           type: TEXT}
+    - {from: kitchenPrinter.entityType, to: kitchen_printer_entity_type, type: TEXT}
+    - {from: kitchenPrinter.guid,       to: kitchen_printer_id,          type: ID}
+    - {from: guid,                      to: prep_station_id,             type: ID}
+    - {from: '$location',               to: store_location_id,           type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: kitchenPrinter,            to: kitchen_printer_ref,         type: JSON_TEXT}
+
+in_packaging_config:
+  source_entity: packaging
+  row_path: []   # each line is one record
+  key: [store_location_id]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: enabled,      to: is_packaging_enabled,    type: BOOLEAN}
+    - {from: items,        to: packaging_items_config,  type: JSON_TEXT}   # always empty in the SOR export; element shape unknown, kept whole
+    - {from: guestMessage, to: packaging_guest_message, type: TEXT}
+    - {from: '$location',  to: store_location_id,       type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+
+in_partner_restaurant:
+  source_entity: partners
+  row_path: []   # each line is one record
+  key: [store_location_id, restaurant_id]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: restaurantGuid,        to: restaurant_id,                 type: ID}
+    - {from: managementGroupGuid,   to: management_group_id,           type: ID}
+    - {from: deleted,               to: is_deleted,                    type: BOOLEAN}
+    - {from: restaurantName,        to: restaurant_name,               type: TEXT}
+    - {from: locationName,          to: store_location_id,             type: TEXT}
+    - {from: createdByEmailAddress, to: created_by_email,              type: TEXT}
+    - {from: externalGroupRef,      to: external_group_ref,            type: TEXT}
+    - {from: externalRestaurantRef, to: external_restaurant_ref,       type: TEXT}
+    - {from: modifiedDate,          to: modified_at,                   type: INT}   # CHECK: epoch milliseconds, kept as INT
+    - {from: createdDate,           to: created_at,                    type: INT}   # CHECK: epoch milliseconds, kept as INT
+    - {from: isoModifiedDate,       to: modified_at_iso_modified_date, type: TIMESTAMP_UTC}
+    - {from: isoCreatedDate,        to: created_at_iso_created_date,   type: TIMESTAMP_UTC}
+
+in_partner_restaurant_scope:
+  source_entity: partners
+  row_path: [scopes]
+  parents: {restaurant_id: restaurantGuid}
+  key: [store_location_id, restaurant_id, scope]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location', to: store_location_id,  type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: '$parent',   to: restaurant_id,      type: ID}
+    - {from: '$index',    to: source_array_index, type: TEXT}   # position of the row in its array, set by the walker
+    - {from: '$value',    to: scope,              type: TEXT}
+
+in_partner_connected_restaurant:
+  source_entity: partners
+  row_path: []   # each line is one record
+  key: [store_location_id, restaurant_id]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: restaurantGuid,        to: restaurant_id,                 type: ID}
+    - {from: managementGroupGuid,   to: management_group_id,           type: ID}
+    - {from: deleted,               to: is_deleted,                    type: BOOLEAN}
+    - {from: restaurantName,        to: restaurant_name,               type: TEXT}
+    - {from: locationName,          to: store_location_id,             type: TEXT}
+    - {from: createdByEmailAddress, to: created_by_email,              type: TEXT}
+    - {from: externalGroupRef,      to: external_group_ref,            type: TEXT}
+    - {from: externalRestaurantRef, to: external_restaurant_ref,       type: TEXT}
+    - {from: modifiedDate,          to: modified_at,                   type: INT}   # CHECK: epoch milliseconds, kept as INT
+    - {from: createdDate,           to: created_at,                    type: INT}   # CHECK: epoch milliseconds, kept as INT
+    - {from: isoModifiedDate,       to: modified_at_iso_modified_date, type: TIMESTAMP_UTC}
+    - {from: isoCreatedDate,        to: created_at_iso_created_date,   type: TIMESTAMP_UTC}
+
+in_partner_connected_restaurant_scope:
+  source_entity: partners
+  row_path: [scopes]
+  parents: {restaurant_id: restaurantGuid}
+  key: [store_location_id, restaurant_id, scope]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location', to: store_location_id,  type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: '$parent',   to: restaurant_id,      type: ID}
+    - {from: '$index',    to: source_array_index, type: TEXT}   # position of the row in its array, set by the walker
+    - {from: '$value',    to: scope,              type: TEXT}
+
+in_ordering_schedule_config:
+  source_entity: ordering_schedule
+  row_path: []   # each line is one record
+  key: [store_location_id]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: acceptScheduledOrders,  to: accept_scheduled_orders,  type: BOOLEAN}
+    - {from: scheduledOrderMaxDays,  to: scheduled_order_max_days, type: INT}
+    - {from: lastOrderConfiguration, to: last_order_configuration, type: TEXT}
+    - {from: timeZoneId,             to: timezone_id,              type: TEXT}
+    - {from: '$location',            to: store_location_id,        type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+
+in_ordering_schedule_period:
+  source_entity: ordering_schedule
+  row_path: [servicePeriods, dayPeriods, timeRanges]
+  parents: {dining_option_behavior: servicePeriods.diningOptionBehavior, day_of_week: servicePeriods.dayPeriods.day}
+  key: [store_location_id, dining_option_behavior, day_of_week, source_array_index]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location', to: store_location_id,      type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: '$parent',   to: dining_option_behavior, type: TEXT}
+    - {from: '$parent',   to: day_of_week,            type: TEXT}
+    - {from: '$index',    to: source_array_index,     type: TEXT}   # position of the row in its array, set by the walker
+    - {from: start,       to: start_time_local,       type: TEXT}
+    - {from: end,         to: end_time_local,         type: TEXT}
+
+in_ordering_schedule_override:
+  source_entity: ordering_schedule
+  row_path: [overrides]
+  key: [store_location_id, override_business_date, source_array_index]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location',  to: store_location_id,      type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: '$index',     to: source_array_index,     type: TEXT}   # position of the row in its array, set by the walker
+    - {from: description,  to: override_description,   type: TEXT}
+    - {from: businessDate, to: override_business_date, type: DATE_INT}
+
+in_ordering_schedule_override_dining_option:
+  source_entity: ordering_schedule
+  row_path: [overrides, diningOptionBehavior]
+  parents: {override_business_date: overrides.businessDate, override_index: overrides.$index}
+  key: [store_location_id, override_index, dining_option_behavior]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location', to: store_location_id,      type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: '$parent',   to: override_business_date, type: DATE_INT}
+    - {from: '$parent',   to: override_index,         type: INT}
+    - {from: '$index',    to: source_array_index,     type: TEXT}   # position of the row in its array, set by the walker
+    - {from: '$value',    to: dining_option_behavior, type: TEXT}
+
+in_ordering_schedule_override_time_range:
+  source_entity: ordering_schedule
+  row_path: [overrides, timeRanges]
+  parents: {override_business_date: overrides.businessDate, override_index: overrides.$index}
+  key: [store_location_id, override_index, source_array_index]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location', to: store_location_id,      type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: '$parent',   to: override_business_date, type: DATE_INT}
+    - {from: '$parent',   to: override_index,         type: INT}
+    - {from: '$index',    to: source_array_index,     type: TEXT}   # position of the row in its array, set by the walker
+    - {from: start,       to: start_time_local,       type: TEXT}
+    - {from: end,         to: end_time_local,         type: TEXT}
+
+in_config_cash_drawer:
+  source_entity: cash_drawers
+  row_path: []   # each line is one record
+  key: [store_location_id, cash_drawer_id]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location',        to: store_location_id,   type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: guid,               to: cash_drawer_id,      type: ID}
+    - {from: entityType,         to: entity_type,         type: TEXT}
+    - {from: printer.guid,       to: printer_id,          type: ID}
+    - {from: printer.entityType, to: printer_entity_type, type: TEXT}
+
+in_config_dining_option:
+  source_entity: dining_options
+  row_path: []   # each line is one record
+  key: [store_location_id, dining_option_id]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location', to: store_location_id,      type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: guid,        to: dining_option_id,       type: ID}
+    - {from: entityType,  to: entity_type,            type: TEXT}
+    - {from: externalId,  to: external_id,            type: ID}
+    - {from: name,        to: dining_option_name,     type: TEXT}
+    - {from: behavior,    to: dining_option_behavior, type: TEXT}
+    - {from: curbside,    to: is_curbside,            type: BOOLEAN}
+
+in_config_discount:
+  source_entity: discounts
+  row_path: []   # each line is one record
+  key: [store_location_id, discount_id]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location',         to: store_location_id,         type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: guid,                to: discount_id,               type: ID}
+    - {from: entityType,          to: entity_type,               type: TEXT}
+    - {from: amount,              to: discount_amount,           type: NUMERIC}
+    - {from: selectionType,       to: discount_item_type,        type: TEXT}
+    - {from: nonExclusive,        to: is_non_exclusive_discount, type: BOOLEAN}
+    - {from: percentage,          to: discount_percentage,       type: NUMERIC}
+    - {from: name,                to: discount_name,             type: TEXT}
+    - {from: active,              to: is_discount_active,        type: BOOLEAN}
+    - {from: itemPickingPriority, to: item_picking_priority,     type: TEXT}
+    - {from: type,                to: discount_type,             type: TEXT}
+    - {from: fixedTotal,          to: is_fixed_total,            type: INT}   # raw value is an integer or null, not a boolean
+
+in_config_discount_promo_code:
+  source_entity: discounts
+  row_path: [promoCodes]
+  parents: {discount_id: guid}
+  key: [store_location_id, discount_id, promo_code_id]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location', to: store_location_id,      type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: '$parent',   to: discount_id,            type: ID}
+    - {from: '$index',    to: source_array_index,     type: TEXT}   # position of the row in its array, set by the walker
+    - {from: guid,        to: promo_code_id,          type: ID}
+    - {from: entityType,  to: promo_code_entity_type, type: TEXT}
+    - {from: name,        to: promo_code_name,        type: TEXT}
+    - {from: code,        to: promo_code,             type: TEXT}
+    - {from: usageType,   to: promo_code_usage_type,  type: TEXT}
+
+in_config_alt_payment_type:
+  source_entity: alternate_payment_types
+  row_path: []   # each line is one record
+  key: [store_location_id, other_payment_id]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location', to: store_location_id,  type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: guid,        to: other_payment_id,   type: ID}
+    - {from: entityType,  to: entity_type,        type: TEXT}
+    - {from: externalId,  to: external_id,        type: ID}
+    - {from: name,        to: other_payment_name, type: TEXT}
+
+in_labor_time_entry:
+  source_entity: time_entries
+  row_path: []   # each line is one record
+  key: [store_location_id, time_entry_id]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: guid,                          to: time_entry_id,                            type: ID}
+    - {from: entityType,                    to: time_entry_entity_type,                   type: TEXT}
+    - {from: externalId,                    to: time_entry_external_id,                   type: ID}
+    - {from: businessDate,                  to: labor_business_date,                      type: TEXT}
+    - {from: '$location',                   to: store_location_id,                        type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: employeeReference.guid,        to: employee_id,                              type: ID}
+    - {from: employeeReference.entityType,  to: employee_reference_entity_type,           type: TEXT}
+    - {from: employeeReference.externalId,  to: employee_reference_external_id,           type: ID}
+    - {from: jobReference.guid,             to: job_id,                                   type: ID}
+    - {from: jobReference.entityType,       to: job_reference_entity_type,                type: TEXT}
+    - {from: jobReference.externalId,       to: job_reference_external_id,                type: ID}
+    - {from: shiftReference,                to: shift_reference,                          type: JSON_TEXT}   # reference object; always null in the sample, kept whole
+    - {from: inDate,                        to: employee_clock_in_at,                     type: TIMESTAMP_UTC}
+    - {from: outDate,                       to: labor_clock_out_at,                       type: TIMESTAMP_UTC}
+    - {from: regularHours,                  to: employee_regular_hours,                   type: NUMERIC}
+    - {from: overtimeHours,                 to: labor_overtime_hours,                     type: NUMERIC}
+    - {from: hourlyWage,                    to: employee_hourly_wage,                     type: NUMERIC}
+    - {from: declaredCashTips,              to: employee_cash_tips_declared_amount,       type: NUMERIC}
+    - {from: nonCashTips,                   to: employee_non_cash_tips_amount,            type: NUMERIC}
+    - {from: cashGratuityServiceCharges,    to: cash_gratuity_service_charge_amount,      type: NUMERIC}
+    - {from: nonCashGratuityServiceCharges, to: non_cash_gratuity_service_charge_amount,  type: NUMERIC}
+    - {from: tipsWithheld,                  to: employee_tips_withheld_amount,            type: NUMERIC}
+    - {from: cashSales,                     to: time_entry_cash_sales_amount,             type: NUMERIC}
+    - {from: nonCashSales,                  to: time_entry_non_cash_sales_amount,         type: NUMERIC}
+    - {from: nonCashTipsRoundingLoss,       to: labor_non_cash_tips_rounding_loss_amount, type: NUMERIC}
+    - {from: autoClockedOut,                to: is_employee_auto_clocked_out,             type: BOOLEAN}
+    - {from: createdDate,                   to: time_entry_created_at,                    type: TIMESTAMP_UTC}
+    - {from: modifiedDate,                  to: time_entry_modified_at,                   type: TIMESTAMP_UTC}
+    - {from: deleted,                       to: is_time_entry_deleted,                    type: BOOLEAN}
+    - {from: deletedDate,                   to: time_entry_deleted_at,                    type: TIMESTAMP_UTC}
+
+in_labor_time_entry_break:
+  source_entity: time_entries
+  row_path: [breaks]
+  parents: {time_entry_id: guid}
+  key: [store_location_id, break_id]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location',          to: store_location_id,      type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: '$parent',            to: time_entry_id,          type: ID}
+    - {from: '$index',             to: source_array_index,     type: TEXT}   # position of the row in its array, set by the walker
+    - {from: guid,                 to: break_id,               type: ID}
+    - {from: breakType.guid,       to: break_type_id,          type: ID}
+    - {from: paid,                 to: is_break_paid,          type: BOOLEAN}
+    - {from: inDate,               to: break_start_at,         type: TIMESTAMP_UTC}
+    - {from: outDate,              to: break_end_at,           type: TIMESTAMP_UTC}
+    - {from: missed,               to: is_break_missed,        type: BOOLEAN}
+    - {from: waived,               to: is_break_waived,        type: BOOLEAN}
+    - {from: auditResponse,        to: break_audit_response,   type: TEXT}
+    - {from: breakType.entityType, to: break_type_entity_type, type: TEXT}
+
+in_labor_employee:
+  source_entity: employees
+  row_path: []   # each line is one record
+  key: [store_location_id, employee_id]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: guid,                   to: employee_id,                        type: ID}
+    - {from: entityType,             to: employee_entity_type,               type: TEXT}
+    - {from: externalId,             to: employee_external_id,               type: ID}
+    - {from: firstName,              to: employee_first_name,                type: TEXT}
+    - {from: lastName,               to: employee_last_name,                 type: TEXT}
+    - {from: chosenName,             to: employee_chosen_name,               type: TEXT}
+    - {from: email,                  to: employee_email,                     type: TEXT}
+    - {from: phoneNumber,            to: employee_phone,                     type: TEXT}
+    - {from: phoneNumberCountryCode, to: employee_phone_number_country_code, type: TEXT}
+    - {from: v2EmployeeGuid,         to: v2_employee_id,                     type: ID}
+    - {from: externalEmployeeId,     to: external_employee_id,               type: ID}   # Toast often sends empty text '' here; kept exactly as sent
+    - {from: '$location',            to: store_location_id,                  type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: createdDate,            to: employee_created_at,                type: TIMESTAMP_UTC}
+    - {from: modifiedDate,           to: employee_modified_at,               type: TIMESTAMP_UTC}
+    - {from: deleted,                to: is_employee_deleted,                type: BOOLEAN}
+    - {from: deletedDate,            to: employee_deleted_at,                type: TIMESTAMP_UTC}
+
+in_labor_employee_wage_override:
+  source_entity: employees
+  row_path: [wageOverrides]
+  parents: {employee_id: guid}
+  key: [store_location_id, employee_id, source_array_index]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location',             to: store_location_id,        type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: '$parent',               to: employee_id,              type: ID}
+    - {from: '$index',                to: source_array_index,       type: TEXT}   # position of the row in its array, set by the walker
+    - {from: wage,                    to: override_wage_rate,       type: NUMERIC}
+    - {from: jobReference.guid,       to: override_job_id,          type: ID}
+    - {from: jobReference.entityType, to: override_job_entity_type, type: TEXT}
+    - {from: jobReference.externalId, to: override_job_external_id, type: ID}
+
+in_labor_employee_job:
+  source_entity: employees
+  row_path: [jobReferences]
+  parents: {employee_id: guid}
+  key: [store_location_id, employee_id, job_assignment_id]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: '$location', to: store_location_id,          type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: '$parent',   to: employee_id,                type: ID}
+    - {from: '$index',    to: source_array_index,         type: TEXT}   # position of the row in its array, set by the walker
+    - {from: guid,        to: job_assignment_id,          type: ID}
+    - {from: entityType,  to: job_assignment_entity_type, type: TEXT}
+    - {from: externalId,  to: job_assignment_external_id, type: ID}
+
+in_labor_job:
+  source_entity: jobs
+  row_path: []   # each line is one record
+  key: [store_location_id, job_id]
+  write_rule: null   # not specified yet
+  columns:
+    - {from: guid,                 to: job_id,                         type: ID}
+    - {from: entityType,           to: job_entity_type,                type: TEXT}
+    - {from: externalId,           to: job_external_id,                type: ID}
+    - {from: title,                to: job_title,                      type: TEXT}
+    - {from: code,                 to: job_code,                       type: TEXT}
+    - {from: tipped,               to: is_job_tipped,                  type: BOOLEAN}
+    - {from: wageFrequency,        to: wage_frequency,                 type: TEXT}
+    - {from: defaultWage,          to: default_wage,                   type: NUMERIC}
+    - {from: excludeFromReporting, to: is_job_excluded_from_reporting, type: BOOLEAN}
+    - {from: '$location',          to: store_location_id,              type: TEXT}   # tenant store name (e.g. 'RASA - Ballpark'); not inside the raw record - the loader sets it from the GCS location folder via the tenant's location config
+    - {from: createdDate,          to: job_created_at,                 type: TIMESTAMP_UTC}
+    - {from: modifiedDate,         to: job_modified_at,                type: TIMESTAMP_UTC}
+    - {from: deleted,              to: is_job_deleted,                 type: BOOLEAN}
+    - {from: deletedDate,          to: job_deleted_at,                 type: TIMESTAMP_UTC}

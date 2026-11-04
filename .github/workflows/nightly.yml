@@ -1,0 +1,86 @@
+# Nightly Toast pipeline: pull -> input -> drv -> semantic -> output -> reconciliation -> reports.
+# Runs at 4:00 AM America/Chicago every day (all year).
+#
+# GitHub cron is UTC and cannot follow daylight saving, so two schedules are listed and the
+# "Only run at 4 AM Central" step lets exactly one of them continue:
+#   09:00 UTC = 4:00 AM CDT (summer)      10:00 UTC = 4:00 AM CST (winter)
+name: Nightly Toast pipeline
+
+on:
+  schedule:
+    - cron: "0 9 * * *"
+    - cron: "0 10 * * *"
+  workflow_dispatch:
+    inputs:
+      date:
+        description: "Business date YYYYMMDD (blank = yesterday, store time)"
+        required: false
+        default: ""
+      deep:
+        description: "Also re-pull the 30-day modified window"
+        type: boolean
+        default: false
+
+concurrency:
+  group: nightly-toast-pipeline
+  cancel-in-progress: false
+
+jobs:
+  nightly:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      TOAST_API_HOSTNAME: ${{ secrets.TOAST_API_HOSTNAME }}
+      TOAST_USER_ACCESS_TYPE: ${{ secrets.TOAST_USER_ACCESS_TYPE }}
+      TOAST_CLIENT_ID: ${{ secrets.TOAST_CLIENT_ID }}
+      TOAST_CLIENT_SECRET: ${{ secrets.TOAST_CLIENT_SECRET }}
+      TOAST_GUID_FONDREN: ${{ secrets.TOAST_GUID_FONDREN }}
+      TOAST_GUID_KATY: ${{ secrets.TOAST_GUID_KATY }}
+      TOAST_GUID_MISSOURI_CITY: ${{ secrets.TOAST_GUID_MISSOURI_CITY }}
+      TOAST_GUID_PEARLAND: ${{ secrets.TOAST_GUID_PEARLAND }}
+      TOAST_GUID_RICHMOND: ${{ secrets.TOAST_GUID_RICHMOND }}
+      TOAST_GUID_SPRING_KLEIN: ${{ secrets.TOAST_GUID_SPRING_KLEIN }}
+      TOAST_GUID_SUGAR_LAND: ${{ secrets.TOAST_GUID_SUGAR_LAND }}
+      REPORT_DIR: ${{ github.workspace }}/reports
+    steps:
+      - name: Only run at 4 AM Central
+        id: gate
+        run: |
+          hour=$(TZ=America/Chicago date +%H)
+          echo "Chicago hour now: $hour (event: ${{ github.event_name }})"
+          if [ "${{ github.event_name }}" = "schedule" ] && [ "$hour" != "04" ]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"; echo "Not 4 AM Central - skipping this schedule slot."
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.gate.outputs.run == 'true'
+
+      - uses: actions/setup-node@v4
+        if: steps.gate.outputs.run == 'true'
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install
+        if: steps.gate.outputs.run == 'true'
+        run: npm ci
+
+      - name: Run nightly pipeline
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          args=""
+          if [ -n "${{ github.event.inputs.date }}" ]; then args="$args --date ${{ github.event.inputs.date }}"; fi
+          if [ "${{ github.event.inputs.deep }}" = "true" ]; then args="$args --deep"; fi
+          node src/nightly.js $args
+
+      - name: Keep the generated reports
+        if: steps.gate.outputs.run == 'true' && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reports-${{ github.run_id }}
+          path: reports/
+          if-no-files-found: ignore
+          retention-days: 30

@@ -1,0 +1,2546 @@
+# Semantic layer (dbt) - the 4 semantic tables, built ONLY from the 103 derived tables (layers/derived).
+# Rule: every column comes from a derived table and exists there under the same name (checked against layers/derived/schema.yml).
+# meta.source_table / source_column (or source_by_row_type for sem_order_items) = the build recipe; meta.stands_for_sw_column = the v6 SW column it replaces.
+# Customer-specific rules (e.g. Rasa 'CATERING - 3PD' menu fallback) live in report formulas, not in these tables.
+
+version: 2
+models:
+- name: sem_order_header
+  description: One row per order (drv_order). An order with N service charges (drv_service_charge) has N rows; only the charge columns differ, order totals repeat.
+  meta:
+    grain: order (+ one row per service charge)
+    built_from:
+    - drv_order
+    - 'drv_check (first check: loyalty)'
+    - drv_service_charge
+    joins:
+    - drv_check on tenant_location_id + order_id, check_sequence = 0
+    - 'drv_service_charge on tenant_location_id + order_id (left join: orders without charges keep one row)'
+    sum_rule: 'order-level money repeats on the extra service-charge rows: count order totals once per tenant_location_id + order_id (the report formulas subtract the rows with source_array_index > 0)'
+  data_tests:
+  - dbt_utils.expression_is_true:
+      expression: order_id is not null
+  columns:
+  - name: organisation_id
+    description: Neon id of the organisation (group) that owns the tenant. Same on every row of one tenant.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: (tenant details)
+      source_table: drv_order
+      source_column: organisation_id
+      how: own row
+  - name: organisation_slug
+    description: Short fixed name of the organisation (e.g. rasa-group).
+    data_type: STRING
+    meta:
+      stands_for_sw_column: (tenant details)
+      source_table: drv_order
+      source_column: organisation_slug
+      how: own row
+  - name: tenant_id
+    description: Neon id of the tenant (customer) the row belongs to.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: (tenant details)
+      source_table: drv_order
+      source_column: tenant_id
+      how: own row
+    data_tests:
+    - not_null
+  - name: tenant_slug
+    description: Short fixed name of the tenant (e.g. tenant_rasa) - the same as the GCS tenant folder.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: (tenant details)
+      source_table: drv_order
+      source_column: tenant_slug
+      how: own row
+  - name: store_location_id
+    description: Which restaurant this row is for. Every per-restaurant total depends on it.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: (tenant details)
+      source_table: drv_order
+      source_column: store_location_id
+      how: own row
+    data_tests:
+    - not_null
+  - name: tenant_location_id
+    description: 'Neon id of the tenant store (tenant_locations.id). Never changes and never repeats, so every join between tables uses it. Not inside the Toast record: the loader sets it from the GCS location
+      folder via the store''s location_sources row.'
+    data_type: STRING
+    meta:
+      stands_for_sw_column: (tenant details)
+      source_table: drv_order
+      source_column: tenant_location_id
+      how: own row
+    data_tests:
+    - not_null
+  - name: store_timezone
+    description: The restaurant's own time zone (Neon tenant_locations.timezone, e.g. America/New_York). Use it to turn the UTC timestamps into the store's local time and business day.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: (tenant details)
+      source_table: drv_order
+      source_column: store_timezone
+      how: own row
+  - name: system_id
+    description: Neon id of the kind of system the data came from (e.g. POS).
+    data_type: STRING
+    meta:
+      stands_for_sw_column: (tenant details)
+      source_table: drv_order
+      source_column: system_id
+      how: own row
+  - name: system_slug
+    description: Short fixed name of the system (e.g. pos).
+    data_type: STRING
+    meta:
+      stands_for_sw_column: (tenant details)
+      source_table: drv_order
+      source_column: system_slug
+      how: own row
+  - name: source_id
+    description: Neon id of the product the data came from (e.g. Toast).
+    data_type: STRING
+    meta:
+      stands_for_sw_column: (tenant details)
+      source_table: drv_order
+      source_column: source_id
+      how: own row
+  - name: source_slug
+    description: Short fixed name of the source (e.g. toast) - the same as the GCS source folder.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: (tenant details)
+      source_table: drv_order
+      source_column: source_slug
+      how: own row
+  - name: source_timezone
+    description: The time zone the source sends its timestamps in (Neon sources.data_timezone). Toast sends UTC - every Toast timestamp ends in +0000.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: (tenant details)
+      source_table: drv_order
+      source_column: source_timezone
+      how: own row
+  - name: source_entity_id
+    description: Neon id of the feed (catalog entity) the row came from, e.g. Toast orders.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: (tenant details)
+      source_table: drv_order
+      source_column: source_entity_id
+      how: own row
+  - name: entity_name
+    description: Name of the feed the row came from (e.g. orders) - the same as the GCS entity folder.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: (tenant details)
+      source_table: drv_order
+      source_column: entity_name
+      how: own row
+  - name: _run_id
+    description: Id of the nightly run that fetched this row - written by the ETL into every record; the same as Neon connector_runs.run_id.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: (tenant details)
+      source_table: drv_order
+      source_column: _run_id
+      how: own row
+  - name: _extracted_at
+    description: When the ETL fetched the record from Toast.
+    data_type: TIMESTAMP
+    meta:
+      stands_for_sw_column: (tenant details)
+      source_table: drv_order
+      source_column: _extracted_at
+      how: own row
+  - name: _source_type
+    description: Source written by the ETL into every record (e.g. toast).
+    data_type: STRING
+    meta:
+      stands_for_sw_column: (tenant details)
+      source_table: drv_order
+      source_column: _source_type
+      how: own row
+  - name: _load_mode
+    description: 'How the record was loaded: incremental, backfill or invalid.'
+    data_type: STRING
+    meta:
+      stands_for_sw_column: (tenant details)
+      source_table: drv_order
+      source_column: _load_mode
+      how: own row
+  - name: order_id
+    description: A unique code that names this order. Every check, item, add-on, and payment for the order points back to this code, and it is what order counts are based on.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: order_id
+      source_table: drv_order
+      source_column: order_id
+      how: own row
+    data_tests:
+    - not_null
+    - relationships:
+        to: ref('drv_order')
+        field: order_id
+  - name: order_business_date
+    description: 'The restaurant''s trading day for this order, as an integer in YYYYMMDD form. It is not the calendar date: an order rung up at 1am is booked to the previous trading day, using the location''s
+      closeout hour. Every daily figure must group on this rather than on a timestamp''s date.'
+    data_type: INT64
+    meta:
+      stands_for_sw_column: order_business_date
+      source_table: drv_order
+      source_column: order_business_date
+      how: own row
+  - name: drv_hour_order_opened_at
+    description: 'Calculation: HOUR( LOCAL_TIME(o.order_opened_at) )  -- 0..23'
+    data_type: INT64
+    meta:
+      stands_for_sw_column: drv_hour_order_opened_at
+      source_table: drv_order
+      source_column: drv_hour_order_opened_at
+      how: own row
+  - name: drv_order_day_of_week
+    description: 'The real weekday of the order (not the schedule setting that shares the name day_of_week). Calculation: weekday name (Monday..Sunday) of o.order_business_date (YYYYMMDD, already the store''s
+      local business day)'
+    data_type: STRING
+    meta:
+      stands_for_sw_column: drv_order_day_of_week
+      source_table: drv_order
+      source_column: drv_order_day_of_week
+      how: own row
+  - name: service_window_name
+    description: The name of the restaurant service (a meal period, like Lunch or Dinner), as set up in Toast. This is the label that shows in reports.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: service_period_name
+      source_table: drv_order
+      source_column: service_window_name
+      how: own row
+  - name: dining_option_name
+    description: The name of the dining option (a way an order is fulfilled, like Dine In or Delivery), as set up in Toast. This is the label that shows in reports.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: dining_option_name
+      source_table: drv_order
+      source_column: dining_option_name
+      how: own row
+  - name: revenue_center_name
+    description: The name of the revenue centre, as set up in Toast. This is the label that shows in reports.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: revenue_center_name
+      source_table: drv_order
+      source_column: revenue_center_name
+      how: own row
+  - name: dining_option_behavior
+    description: The underlying fulfilment behaviour of this dining option, dine-in, takeaway or delivery. The name is free text, so this column is the one to group by; two options named differently can
+      share one behaviour.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: dining_option_config_behavior
+      source_table: drv_order
+      source_column: dining_option_behavior
+      how: own row
+  - name: order_source
+    description: The channel the order arrived through, 'In Store' for the till, 'app connection' for outside and delivery-marketplace orders, 'Online Ordering' for Toast's own web ordering. This is the
+      column that separates first-party revenue from marketplace revenue, so it drives channel mix and commission analysis.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: order_source
+      source_table: drv_order
+      source_column: order_source
+      how: own row
+  - name: drv_order_counted
+    description: 'Does this order count as a real order? 1 = yes; 0 = it was voided or has zero guests (Toast leaves zero-guest orders out of its order count). Calculation: 1 IF LIVE_ORDER(o) AND o.guest_count
+      >= 1 ELSE 0  -- Toast leaves zero-guest orders out of its order count'
+    data_type: INT64
+    meta:
+      stands_for_sw_column: drv_order_counted
+      source_table: drv_order
+      source_column: drv_order_counted
+      how: own row
+  - name: guest_count
+    description: The guest count entered for this order. It drives cover counts and average spend per head; marketplace orders default it to one regardless of how many people are actually eating.
+    data_type: INT64
+    meta:
+      stands_for_sw_column: guest_count
+      source_table: drv_order
+      source_column: guest_count
+      how: own row
+  - name: drv_gross_sales
+    description: 'Add up the menu price of everything really sold on the order, before any discount. Calculation: SUM(drv_items.drv_gross_sales) WHERE drv_items.order_id = o.order_id'
+    data_type: NUMERIC
+    meta:
+      stands_for_sw_column: drv_gross_sales
+      source_table: drv_order
+      source_column: drv_gross_sales
+      how: own row
+  - name: drv_discount_amount_total
+    description: 'All the money taken off the bill by discounts, whether they were on the whole check or on single items. Calculation: SUM(drv_check.drv_discount) WHERE drv_check.order_id = o.order_id  +  drv_item_discount_total'
+    data_type: NUMERIC
+    meta:
+      stands_for_sw_column: drv_discount_amount_total
+      source_table: drv_order
+      source_column: drv_discount_amount_total
+      how: own row
+  - name: drv_item_discount_total
+    description: 'Only the discounts that were put on single items (not the ones on the whole check). Calculation: SUM(drv_items.drv_discount) WHERE drv_items.order_id = o.order_id'
+    data_type: NUMERIC
+    meta:
+      stands_for_sw_column: drv_item_discount_total
+      source_table: drv_order
+      source_column: drv_item_discount_total
+      how: own row
+  - name: drv_refund_amount
+    description: 'How much was handed back to the guest for food/drink, not counting the tax that went back with it. Dated on the ORDER day, not the refund day. Calculation: SUM(drv_payment.drv_refund_net)
+      WHERE drv_payment.order_id = o.order_id  -  SUM(i.items_refund_tax_amount) WHERE i.order_id = o.order_id  -- refund without its tax, dated on the order day'
+    data_type: NUMERIC
+    meta:
+      stands_for_sw_column: drv_refund_amount
+      source_table: drv_order
+      source_column: drv_refund_amount
+      how: own row
+  - name: drv_net_sales
+    description: 'What the order really earned: menu price minus discounts minus refunds. Calculation: drv_gross_sales - drv_discount_amount_total - drv_refund_amount'
+    data_type: NUMERIC
+    meta:
+      stands_for_sw_column: drv_net_sales
+      source_table: drv_order
+      source_column: drv_net_sales
+      how: own row
+  - name: drv_tip_amount
+    description: 'Tips guests left on this order. Calculation: SUM(drv_payment.drv_tips) WHERE drv_payment.order_id = o.order_id'
+    data_type: NUMERIC
+    meta:
+      stands_for_sw_column: drv_tip_amount
+      source_table: drv_order
+      source_column: drv_tip_amount
+      how: own row
+  - name: drv_service_charge_total
+    description: 'All service charges (like a delivery fee) added to the order. Calculation: SUM(drv_check.drv_service_charge) WHERE drv_check.order_id = o.order_id'
+    data_type: NUMERIC
+    meta:
+      stands_for_sw_column: drv_service_charge_total
+      source_table: drv_order
+      source_column: drv_service_charge_total
+      how: own row
+  - name: drv_tax_amount_total
+    description: 'All the tax charged on the order. Calculation: SUM(c.check_tax_amount) WHERE c.order_id = o.order_id AND LIVE_CHECK(c)'
+    data_type: NUMERIC
+    meta:
+      stands_for_sw_column: drv_tax_amount_total
+      source_table: drv_order
+      source_column: drv_tax_amount_total
+      how: own row
+  - name: order_duration_seconds
+    description: How long the order stayed open, in seconds, from opening to closing. It measures the guest's elapsed time rather than kitchen prep time, so a long value on a dine-in order means a long
+      visit, not a slow kitchen.
+    data_type: INT64
+    meta:
+      stands_for_sw_column: order_duration_seconds
+      source_table: drv_order
+      source_column: order_duration_seconds
+      how: own row
+  - name: is_order_voided
+    description: 'Yes/no: whether the whole order was voided. Voided orders must be excluded from sales and order counts, but are kept because void rate is itself a control metric.'
+    data_type: BOOL
+    meta:
+      stands_for_sw_column: is_order_voided
+      source_table: drv_order
+      source_column: is_order_voided
+      how: own row
+  - name: order_void_business_date
+    description: The restaurant's trading day on which the order was voided, as an integer in YYYYMMDD form. A void can fall on a later trading day than the sale.
+    data_type: INT64
+    meta:
+      stands_for_sw_column: order_void_business_date
+      source_table: drv_order
+      source_column: order_void_business_date
+      how: own row
+  - name: drv_gross_sales_including_voided
+    description: 'What the order would have been worth if nothing had been voided. Minus gross_sales it shows the money lost to voids. Calculation: SUM(i.item_price_before_discount) WHERE i.order_id = o.order_id  --
+      every item, no live/void/waste/deferred filter'
+    data_type: NUMERIC
+    meta:
+      stands_for_sw_column: drv_gross_sales_including_voided
+      source_table: drv_order
+      source_column: drv_gross_sales_including_voided
+      how: own row
+  - name: loyalty_vendor
+    description: Which loyalty provider granted this benefit, Toast's own programme or an integrated outside provider.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: drv_loyalty_vendor
+      source_table: drv_check
+      source_column: loyalty_vendor
+      how: 'joined: drv_check on tenant_location_id + order_id where check_sequence = 0 (the order''s first check)'
+  - name: loyalty_accrual_family_id
+    description: Toast's identifier for the loyalty accrual family this activity counted towards, which groups the rules that decide how points are earned.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: drv_loyalty_accrual_family_id
+      source_table: drv_check
+      source_column: loyalty_accrual_family_id
+      how: 'joined: drv_check on tenant_location_id + order_id where check_sequence = 0 (the order''s first check)'
+  - name: loyalty_identifier_masked
+    description: The last few digits of the guest's loyalty number, safe to show on receipts and in reports.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: drv_loyalty_identifier_masked
+      source_table: drv_check
+      source_column: loyalty_identifier_masked
+      how: 'joined: drv_check on tenant_location_id + order_id where check_sequence = 0 (the order''s first check)'
+  - name: source_array_index
+    description: Position of this entry in its list in the Toast record (0 = first). Keeps the original order and tells entries apart when they have no id.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: check_sequence
+      source_table: drv_service_charge
+      source_column: source_array_index
+      how: one row per service charge of the order (joined on tenant_location_id + order_id)
+  - name: config_service_charge_service_charge_name
+    description: The name of the service charge, as set up in Toast. This is the label that shows in reports.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: charge_config_name
+      source_table: drv_service_charge
+      source_column: config_service_charge_service_charge_name
+      how: one row per service charge of the order (joined on tenant_location_id + order_id)
+  - name: is_gratuity_charge
+    description: 'Yes/no: whether this service charge is a gratuity. Gratuities belong to staff and must be kept out of restaurant revenue.'
+    data_type: BOOL
+    meta:
+      stands_for_sw_column: is_gratuity_charge
+      source_table: drv_service_charge
+      source_column: is_gratuity_charge
+      how: one row per service charge of the order (joined on tenant_location_id + order_id)
+  - name: is_taxable_charge
+    description: 'Yes/no: whether the service charge is subject to tax.'
+    data_type: BOOL
+    meta:
+      stands_for_sw_column: is_taxable_charge
+      source_table: drv_service_charge
+      source_column: is_taxable_charge
+      how: one row per service charge of the order (joined on tenant_location_id + order_id)
+  - name: service_charge_type
+    description: 'Yes/no: whether this service charge is a fixed amount, a percentage, or an open amount typed at the till.'
+    data_type: STRING
+    meta:
+      stands_for_sw_column: charge_config_type
+      source_table: drv_service_charge
+      source_column: service_charge_type
+      how: one row per service charge of the order (joined on tenant_location_id + order_id)
+  - name: service_charge_percent
+    description: The percentage rate configured for this service charge, used when amountType is PERCENT.
+    data_type: NUMERIC
+    meta:
+      stands_for_sw_column: charge_config_percent
+      source_table: drv_service_charge
+      source_column: service_charge_percent
+      how: one row per service charge of the order (joined on tenant_location_id + order_id)
+  - name: check_service_charge_category
+    description: Toast's category for this service charge, which decides how it is treated in reporting, as revenue, as a gratuity owed to staff, or as a pass-through.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: check_service_charge_category
+      source_table: drv_service_charge
+      source_column: check_service_charge_category
+      how: one row per service charge of the order (joined on tenant_location_id + order_id)
+  - name: drv_live_charge_amount
+    description: 'The amount of one service charge. A check with two charges has two rows, one per charge. Calculation: s.service_charge_amount IF LIVE_CHECK(c of s.check_id) ELSE 0'
+    data_type: NUMERIC
+    meta:
+      stands_for_sw_column: drv_live_charge_amount
+      source_table: drv_service_charge
+      source_column: drv_live_charge_amount
+      how: one row per service charge of the order (joined on tenant_location_id + order_id)
+  - name: service_charge_refund_amount
+    description: The money refunded against the refund of this service charge, in the restaurant's currency. Refunds are recorded against the original line, so this can be dated later than the sale itself.
+    data_type: NUMERIC
+    meta:
+      stands_for_sw_column: drv_charge_refund_amount
+      source_table: drv_service_charge
+      source_column: service_charge_refund_amount
+      how: one row per service charge of the order (joined on tenant_location_id + order_id)
+  - name: drv_charge_refund_date
+    description: 'The day the service-charge refund actually happened. Toast reports refunds on that day, not on the sale day. Calculation: p.payment_refund_business_date OF the in_payment p WHERE p.order_id
+      = s.order_id AND p.refund_transaction_id = s.service_charge_refund_transaction_id; empty if s.service_charge_refund_transaction_id is empty'
+    data_type: INT64
+    meta:
+      stands_for_sw_column: drv_charge_refund_date
+      source_table: drv_service_charge
+      source_column: drv_charge_refund_date
+      how: one row per service charge of the order (joined on tenant_location_id + order_id)
+  - name: drv_charge_tax_amount
+    description: 'The tax charged on a service charge (for example Bag Tax on a bag fee). Calculation: SUM(t.tax_amount) WHERE t.check_service_charge_id = s.check_service_charge_id AND t.tax_type <> ''EXTERNAL'',
+      IF LIVE_CHECK(c) ELSE 0'
+    data_type: NUMERIC
+    meta:
+      stands_for_sw_column: drv_charge_tax_amount
+      source_table: drv_service_charge
+      source_column: drv_charge_tax_amount
+      how: one row per service charge of the order (joined on tenant_location_id + order_id)
+  - name: drv_charge_tax_name
+    description: 'Which tax line that charge tax belongs to. Calculation: t.tax_name OF the first (lowest t.appliedtaxes_sequence) in_tax t WHERE t.check_service_charge_id = s.check_service_charge_id AND
+      t.tax_type <> ''EXTERNAL'''
+    data_type: STRING
+    meta:
+      stands_for_sw_column: drv_charge_tax_name
+      source_table: drv_service_charge
+      source_column: drv_charge_tax_name
+      how: one row per service charge of the order (joined on tenant_location_id + order_id)
+  - name: drv_charge_external_tax_amount
+    description: 'Tax on a service charge that a marketplace collects; Toast reports it on its own tax lines. Calculation: SUM(t.tax_amount) WHERE t.check_service_charge_id = s.check_service_charge_id AND
+      t.tax_type = ''EXTERNAL'', IF LIVE_CHECK(c) ELSE 0  -- marketplace facilitator tax'
+    data_type: NUMERIC
+    meta:
+      stands_for_sw_column: drv_charge_external_tax_amount
+      source_table: drv_service_charge
+      source_column: drv_charge_external_tax_amount
+      how: one row per service charge of the order (joined on tenant_location_id + order_id)
+  - name: drv_charge_taxable_amount
+    description: 'The amount that was taxed on the charge. Calculation: drv_live_charge_amount IF drv_charge_tax_amount > 0 ELSE 0'
+    data_type: NUMERIC
+    meta:
+      stands_for_sw_column: drv_charge_taxable_amount
+      source_table: drv_service_charge
+      source_column: drv_charge_taxable_amount
+      how: one row per service charge of the order (joined on tenant_location_id + order_id)
+  - name: service_charge_refund_tax_amount
+    description: The tax portion of the refund on the refund of this service charge. It is tracked separately so tax liability can be reduced without distorting net sales.
+    data_type: NUMERIC
+    meta:
+      stands_for_sw_column: drv_charge_tax_refund_amount
+      source_table: drv_service_charge
+      source_column: service_charge_refund_tax_amount
+      how: one row per service charge of the order (joined on tenant_location_id + order_id)
+  - name: drv_has_voided_item
+    description: 'Did anyone void an item on this order? Adding these up gives Toast''s "void order count". Calculation: 1 IF EXISTS i WHERE i.order_id = o.order_id AND i.is_item_voided is true ELSE 0'
+    data_type: INT64
+    meta:
+      stands_for_sw_column: drv_has_voided_item
+      source_table: drv_order
+      source_column: drv_has_voided_item
+      how: own row
+  - name: drv_unpaid_amount
+    description: 'Money still owed: bills rung up but not paid yet. Calculation: SUM(c.check_total_amount) WHERE c.order_id = o.order_id AND LIVE_CHECK(c) AND c.check_payment_status = ''OPEN'''
+    data_type: NUMERIC
+    meta:
+      stands_for_sw_column: drv_unpaid_amount
+      source_table: drv_order
+      source_column: drv_unpaid_amount
+      how: own row
+- name: sem_order_items
+  description: UNION of 5 derived tables, one row per item / modifier / tax / discount / trigger, told apart by row_type. Columns not filled for a row type are empty. (In Excel it is split over 2 sheets
+    only because of the row limit - it is ONE table.)
+  meta:
+    grain: item | modifier | tax | discount | trigger
+    union_of:
+      item: drv_items
+      modifier: drv_modifier
+      tax: drv_tax
+      discount: drv_discount
+      trigger: drv_discount_trigger_item
+    joins:
+    - drv_order on tenant_location_id + order_id (order business date, revenue center, dining option, service period)
+    - 'drv_items on tenant_location_id + item_id (tax rows: menu_name, drv_is_open_item)'
+    sum_rule: 'always filter row_type before summing money: a modifier''s price is inside its item, a discount row is also inside the item''s drv_discount'
+  columns:
+  - name: organisation_id
+    description: Neon id of the organisation (group) that owns the tenant. Same on every row of one tenant.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: (tenant details)
+      source_by_row_type:
+        item:
+          source_table: drv_items
+          source_column: organisation_id
+          how: own row
+        modifier:
+          source_table: drv_modifier
+          source_column: organisation_id
+          how: own row
+        tax:
+          source_table: drv_tax
+          source_column: organisation_id
+          how: own row
+        discount:
+          source_table: drv_discount
+          source_column: organisation_id
+          how: own row
+        trigger:
+          source_table: drv_discount_trigger_item
+          source_column: organisation_id
+          how: own row
+  - name: organisation_slug
+    description: Short fixed name of the organisation (e.g. rasa-group).
+    data_type: STRING
+    meta:
+      stands_for_sw_column: (tenant details)
+      source_by_row_type:
+        item:
+          source_table: drv_items
+          source_column: organisation_slug
+          how: own row
+        modifier:
+          source_table: drv_modifier
+          source_column: organisation_slug
+          how: own row
+        tax:
+          source_table: drv_tax
+          source_column: organisation_slug
+          how: own row
+        discount:
+          source_table: drv_discount
+          source_column: organisation_slug
+          how: own row
+        trigger:
+          source_table: drv_discount_trigger_item
+          source_column: organisation_slug
+          how: own row
+  - name: tenant_id
+    description: Neon id of the tenant (customer) the row belongs to.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: (tenant details)
+      source_by_row_type:
+        item:
+          source_table: drv_items
+          source_column: tenant_id
+          how: own row
+        modifier:
+          source_table: drv_modifier
+          source_column: tenant_id
+          how: own row
+        tax:
+          source_table: drv_tax
+          source_column: tenant_id
+          how: own row
+        discount:
+          source_table: drv_discount
+          source_column: tenant_id
+          how: own row
+        trigger:
+          source_table: drv_discount_trigger_item
+          source_column: tenant_id
+          how: own row
+    data_tests:
+    - not_null
+  - name: tenant_slug
+    description: Short fixed name of the tenant (e.g. tenant_rasa) - the same as the GCS tenant folder.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: (tenant details)
+      source_by_row_type:
+        item:
+          source_table: drv_items
+          source_column: tenant_slug
+          how: own row
+        modifier:
+          source_table: drv_modifier
+          source_column: tenant_slug
+          how: own row
+        tax:
+          source_table: drv_tax
+          source_column: tenant_slug
+          how: own row
+        discount:
+          source_table: drv_discount
+          source_column: tenant_slug
+          how: own row
+        trigger:
+          source_table: drv_discount_trigger_item
+          source_column: tenant_slug
+          how: own row
+  - name: store_location_id
+    description: Which restaurant this row is for. Every per-restaurant total depends on it.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: (tenant details)
+      source_by_row_type:
+        item:
+          source_table: drv_items
+          source_column: store_location_id
+          how: own row
+        modifier:
+          source_table: drv_modifier
+          source_column: store_location_id
+          how: own row
+        tax:
+          source_table: drv_tax
+          source_column: store_location_id
+          how: own row
+        discount:
+          source_table: drv_discount
+          source_column: store_location_id
+          how: own row
+        trigger:
+          source_table: drv_discount_trigger_item
+          source_column: store_location_id
+          how: own row
+    data_tests:
+    - not_null
+  - name: tenant_location_id
+    description: 'Neon id of the tenant store (tenant_locations.id). Never changes and never repeats, so every join between tables uses it. Not inside the Toast record: the loader sets it from the GCS location
+      folder via the store''s location_sources row.'
+    data_type: STRING
+    meta:
+      stands_for_sw_column: (tenant details)
+      source_by_row_type:
+        item:
+          source_table: drv_items
+          source_column: tenant_location_id
+          how: own row
+        modifier:
+          source_table: drv_modifier
+          source_column: tenant_location_id
+          how: own row
+        tax:
+          source_table: drv_tax
+          source_column: tenant_location_id
+          how: own row
+        discount:
+          source_table: drv_discount
+          source_column: tenant_location_id
+          how: own row
+        trigger:
+          source_table: drv_discount_trigger_item
+          source_column: tenant_location_id
+          how: own row
+    data_tests:
+    - not_null
+  - name: store_timezone
+    description: The restaurant's own time zone (Neon tenant_locations.timezone, e.g. America/New_York). Use it to turn the UTC timestamps into the store's local time and business day.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: (tenant details)
+      source_by_row_type:
+        item:
+          source_table: drv_items
+          source_column: store_timezone
+          how: own row
+        modifier:
+          source_table: drv_modifier
+          source_column: store_timezone
+          how: own row
+        tax:
+          source_table: drv_tax
+          source_column: store_timezone
+          how: own row
+        discount:
+          source_table: drv_discount
+          source_column: store_timezone
+          how: own row
+        trigger:
+          source_table: drv_discount_trigger_item
+          source_column: store_timezone
+          how: own row
+  - name: system_id
+    description: Neon id of the kind of system the data came from (e.g. POS).
+    data_type: STRING
+    meta:
+      stands_for_sw_column: (tenant details)
+      source_by_row_type:
+        item:
+          source_table: drv_items
+          source_column: system_id
+          how: own row
+        modifier:
+          source_table: drv_modifier
+          source_column: system_id
+          how: own row
+        tax:
+          source_table: drv_tax
+          source_column: system_id
+          how: own row
+        discount:
+          source_table: drv_discount
+          source_column: system_id
+          how: own row
+        trigger:
+          source_table: drv_discount_trigger_item
+          source_column: system_id
+          how: own row
+  - name: system_slug
+    description: Short fixed name of the system (e.g. pos).
+    data_type: STRING
+    meta:
+      stands_for_sw_column: (tenant details)
+      source_by_row_type:
+        item:
+          source_table: drv_items
+          source_column: system_slug
+          how: own row
+        modifier:
+          source_table: drv_modifier
+          source_column: system_slug
+          how: own row
+        tax:
+          source_table: drv_tax
+          source_column: system_slug
+          how: own row
+        discount:
+          source_table: drv_discount
+          source_column: system_slug
+          how: own row
+        trigger:
+          source_table: drv_discount_trigger_item
+          source_column: system_slug
+          how: own row
+  - name: source_id
+    description: Neon id of the product the data came from (e.g. Toast).
+    data_type: STRING
+    meta:
+      stands_for_sw_column: (tenant details)
+      source_by_row_type:
+        item:
+          source_table: drv_items
+          source_column: source_id
+          how: own row
+        modifier:
+          source_table: drv_modifier
+          source_column: source_id
+          how: own row
+        tax:
+          source_table: drv_tax
+          source_column: source_id
+          how: own row
+        discount:
+          source_table: drv_discount
+          source_column: source_id
+          how: own row
+        trigger:
+          source_table: drv_discount_trigger_item
+          source_column: source_id
+          how: own row
+  - name: source_slug
+    description: Short fixed name of the source (e.g. toast) - the same as the GCS source folder.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: (tenant details)
+      source_by_row_type:
+        item:
+          source_table: drv_items
+          source_column: source_slug
+          how: own row
+        modifier:
+          source_table: drv_modifier
+          source_column: source_slug
+          how: own row
+        tax:
+          source_table: drv_tax
+          source_column: source_slug
+          how: own row
+        discount:
+          source_table: drv_discount
+          source_column: source_slug
+          how: own row
+        trigger:
+          source_table: drv_discount_trigger_item
+          source_column: source_slug
+          how: own row
+  - name: source_timezone
+    description: The time zone the source sends its timestamps in (Neon sources.data_timezone). Toast sends UTC - every Toast timestamp ends in +0000.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: (tenant details)
+      source_by_row_type:
+        item:
+          source_table: drv_items
+          source_column: source_timezone
+          how: own row
+        modifier:
+          source_table: drv_modifier
+          source_column: source_timezone
+          how: own row
+        tax:
+          source_table: drv_tax
+          source_column: source_timezone
+          how: own row
+        discount:
+          source_table: drv_discount
+          source_column: source_timezone
+          how: own row
+        trigger:
+          source_table: drv_discount_trigger_item
+          source_column: source_timezone
+          how: own row
+  - name: source_entity_id
+    description: Neon id of the feed (catalog entity) the row came from, e.g. Toast orders.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: (tenant details)
+      source_by_row_type:
+        item:
+          source_table: drv_items
+          source_column: source_entity_id
+          how: own row
+        modifier:
+          source_table: drv_modifier
+          source_column: source_entity_id
+          how: own row
+        tax:
+          source_table: drv_tax
+          source_column: source_entity_id
+          how: own row
+        discount:
+          source_table: drv_discount
+          source_column: source_entity_id
+          how: own row
+        trigger:
+          source_table: drv_discount_trigger_item
+          source_column: source_entity_id
+          how: own row
+  - name: entity_name
+    description: Name of the feed the row came from (e.g. orders) - the same as the GCS entity folder.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: (tenant details)
+      source_by_row_type:
+        item:
+          source_table: drv_items
+          source_column: entity_name
+          how: own row
+        modifier:
+          source_table: drv_modifier
+          source_column: entity_name
+          how: own row
+        tax:
+          source_table: drv_tax
+          source_column: entity_name
+          how: own row
+        discount:
+          source_table: drv_discount
+          source_column: entity_name
+          how: own row
+        trigger:
+          source_table: drv_discount_trigger_item
+          source_column: entity_name
+          how: own row
+  - name: _run_id
+    description: Id of the nightly run that fetched this row - written by the ETL into every record; the same as Neon connector_runs.run_id.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: (tenant details)
+      source_by_row_type:
+        item:
+          source_table: drv_items
+          source_column: _run_id
+          how: own row
+        modifier:
+          source_table: drv_modifier
+          source_column: _run_id
+          how: own row
+        tax:
+          source_table: drv_tax
+          source_column: _run_id
+          how: own row
+        discount:
+          source_table: drv_discount
+          source_column: _run_id
+          how: own row
+        trigger:
+          source_table: drv_discount_trigger_item
+          source_column: _run_id
+          how: own row
+  - name: _extracted_at
+    description: When the ETL fetched the record from Toast.
+    data_type: TIMESTAMP
+    meta:
+      stands_for_sw_column: (tenant details)
+      source_by_row_type:
+        item:
+          source_table: drv_items
+          source_column: _extracted_at
+          how: own row
+        modifier:
+          source_table: drv_modifier
+          source_column: _extracted_at
+          how: own row
+        tax:
+          source_table: drv_tax
+          source_column: _extracted_at
+          how: own row
+        discount:
+          source_table: drv_discount
+          source_column: _extracted_at
+          how: own row
+        trigger:
+          source_table: drv_discount_trigger_item
+          source_column: _extracted_at
+          how: own row
+  - name: _source_type
+    description: Source written by the ETL into every record (e.g. toast).
+    data_type: STRING
+    meta:
+      stands_for_sw_column: (tenant details)
+      source_by_row_type:
+        item:
+          source_table: drv_items
+          source_column: _source_type
+          how: own row
+        modifier:
+          source_table: drv_modifier
+          source_column: _source_type
+          how: own row
+        tax:
+          source_table: drv_tax
+          source_column: _source_type
+          how: own row
+        discount:
+          source_table: drv_discount
+          source_column: _source_type
+          how: own row
+        trigger:
+          source_table: drv_discount_trigger_item
+          source_column: _source_type
+          how: own row
+  - name: _load_mode
+    description: 'How the record was loaded: incremental, backfill or invalid.'
+    data_type: STRING
+    meta:
+      stands_for_sw_column: (tenant details)
+      source_by_row_type:
+        item:
+          source_table: drv_items
+          source_column: _load_mode
+          how: own row
+        modifier:
+          source_table: drv_modifier
+          source_column: _load_mode
+          how: own row
+        tax:
+          source_table: drv_tax
+          source_column: _load_mode
+          how: own row
+        discount:
+          source_table: drv_discount
+          source_column: _load_mode
+          how: own row
+        trigger:
+          source_table: drv_discount_trigger_item
+          source_column: _load_mode
+          how: own row
+  - name: item_id
+    description: A unique code that names the order line (one menu item ordered on this check). It never changes and is never reused, so it is safe to match on.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: item_id
+      source_by_row_type:
+        item:
+          source_table: drv_items
+          source_column: item_id
+          how: own row
+        modifier:
+          source_table: drv_modifier
+          source_column: item_id
+          how: own row
+        tax:
+          source_table: drv_tax
+          source_column: item_id
+          how: own row
+        discount:
+          source_table: drv_discount
+          source_column: item_id
+          how: own row
+        trigger:
+          source_table: drv_discount_trigger_item
+          source_column: item_id
+          how: own row
+  - name: check_id
+    description: Unique ID of the check this item belongs to.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: check_id
+      source_by_row_type:
+        item:
+          source_table: drv_items
+          source_column: check_id
+          how: own row
+        modifier:
+          source_table: drv_modifier
+          source_column: check_id
+          how: own row
+        tax:
+          source_table: drv_tax
+          source_column: check_id
+          how: own row
+        discount:
+          source_table: drv_discount
+          source_column: check_id
+          how: own row
+        trigger:
+          source_table: drv_discount_trigger_item
+          source_column: check_id
+          how: own row
+  - name: order_id
+    description: A unique code that names this order. Every check, item, add-on, and payment for the order points back to this code, and it is what order counts are based on.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: order_id
+      source_by_row_type:
+        item:
+          source_table: drv_items
+          source_column: order_id
+          how: own row
+        modifier:
+          source_table: drv_modifier
+          source_column: order_id
+          how: own row
+        tax:
+          source_table: drv_tax
+          source_column: order_id
+          how: own row
+        discount:
+          source_table: drv_discount
+          source_column: order_id
+          how: own row
+        trigger:
+          source_table: drv_discount_trigger_item
+          source_column: order_id
+          how: own row
+    data_tests:
+    - not_null
+    - relationships:
+        to: ref('drv_order')
+        field: order_id
+  - name: order_business_date
+    description: 'The restaurant''s trading day for this order, as an integer in YYYYMMDD form. It is not the calendar date: an order rung up at 1am is booked to the previous trading day, using the location''s
+      closeout hour. Every daily figure must group on this rather than on a timestamp''s date.'
+    data_type: INT64
+    meta:
+      stands_for_sw_column: drv_business_date
+      source_by_row_type:
+        item:
+          source_table: drv_order
+          source_column: order_business_date
+          how: 'joined: drv_order on tenant_location_id + order_id'
+        modifier:
+          source_table: drv_order
+          source_column: order_business_date
+          how: 'joined: drv_order on tenant_location_id + order_id'
+        tax:
+          source_table: drv_order
+          source_column: order_business_date
+          how: 'joined: drv_order on tenant_location_id + order_id'
+        discount:
+          source_table: drv_order
+          source_column: order_business_date
+          how: 'joined: drv_order on tenant_location_id + order_id'
+        trigger:
+          source_table: drv_order
+          source_column: order_business_date
+          how: 'joined: drv_order on tenant_location_id + order_id'
+  - name: row_type
+    description: 'Which derived table the row comes from: item (drv_items), modifier (drv_modifier), tax (drv_tax), discount (drv_discount), trigger (drv_discount_trigger_item).'
+    data_type: STRING
+    meta:
+      stands_for_sw_column: row_type
+      source: row type label set by the union
+    data_tests:
+    - accepted_values:
+        values:
+        - item
+        - modifier
+        - tax
+        - discount
+        - trigger
+    - not_null
+  - name: revenue_center_name
+    description: The name of the revenue centre, as set up in Toast. This is the label that shows in reports.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: revenue_center_name
+      source_by_row_type:
+        item:
+          source_table: drv_order
+          source_column: revenue_center_name
+          how: 'joined: drv_order on tenant_location_id + order_id'
+        modifier:
+          source_table: drv_order
+          source_column: revenue_center_name
+          how: 'joined: drv_order on tenant_location_id + order_id'
+        tax:
+          source_table: drv_order
+          source_column: revenue_center_name
+          how: 'joined: drv_order on tenant_location_id + order_id'
+        discount:
+          source_table: drv_order
+          source_column: revenue_center_name
+          how: 'joined: drv_order on tenant_location_id + order_id'
+        trigger:
+          source_table: drv_order
+          source_column: revenue_center_name
+          how: 'joined: drv_order on tenant_location_id + order_id'
+  - name: item_quantity
+    description: How many of this menu item were ordered on the line. Multiply by the line's price to get its gross value; fractional values appear for items sold by weight.
+    data_type: NUMERIC
+    meta:
+      stands_for_sw_column: quantity (item rows)
+      source_by_row_type:
+        item:
+          source_table: drv_items
+          source_column: item_quantity
+          how: own row
+  - name: modifier_quantity
+    description: How many of this modifier option were chosen. It is stated per line rather than per parent item, so a quantity of two on a modifier under a single item means the guest asked for a double
+      portion.
+    data_type: NUMERIC
+    meta:
+      stands_for_sw_column: quantity (modifier rows)
+      source_by_row_type:
+        modifier:
+          source_table: drv_modifier
+          source_column: modifier_quantity
+          how: own row
+  - name: triggers_quantity
+    description: How many of the order line whose presence triggered this discount were ordered. Fractional values appear for items sold by weight or measure.
+    data_type: INT64
+    meta:
+      stands_for_sw_column: quantity (trigger rows)
+      source_by_row_type:
+        trigger:
+          source_table: drv_discount_trigger_item
+          source_column: triggers_quantity
+          how: own row
+  - name: is_item_voided
+    description: 'Yes/no: whether the order line (one menu item ordered on this check) was voided. Voided rows must be excluded from sales, item counts and tax, but are kept because voids themselves are
+      a control metric.'
+    data_type: BOOL
+    meta:
+      stands_for_sw_column: is_voided (item rows)
+      source_by_row_type:
+        item:
+          source_table: drv_items
+          source_column: is_item_voided
+          how: own row
+  - name: is_voided
+    description: 'Yes/no: whether the modifier (an option chosen on the parent order line) was voided. Voided rows must be excluded from sales, item counts and tax, but are kept because voids themselves
+      are a control metric.'
+    data_type: BOOL
+    meta:
+      stands_for_sw_column: is_voided (modifier rows)
+      source_by_row_type:
+        modifier:
+          source_table: drv_modifier
+          source_column: is_voided
+          how: own row
+  - name: void_reason_name
+    description: The name of the reason for voiding a line or payment, as set up in Toast. This is the label that shows in reports.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: void_reason_name
+      source_by_row_type:
+        item:
+          source_table: drv_items
+          source_column: void_reason_name
+          how: own row
+        modifier:
+          source_table: drv_modifier
+          source_column: void_reason_name
+          how: own row
+  - name: drv_discount
+    description: 'Discounts put directly on this item. Calculation: SUM(d.discount_amount) WHERE d.item_id = i.item_id AND d.modifier_id IS NULL AND LIVE_DISCOUNT(d), IF LIVE_ITEM(i) AND NOT WASTE_ITEM(i)
+      ELSE 0  -- the item''s own discounts'
+    data_type: NUMERIC
+    meta:
+      stands_for_sw_column: drv_discount
+      source_by_row_type:
+        item:
+          source_table: drv_items
+          source_column: drv_discount
+          how: own row
+        discount:
+          source_table: drv_discount
+          source_column: drv_discount
+          how: own row
+  - name: discount_id
+    description: A unique code that names the discount applied to this check. It never changes and is never reused, so it is safe to match on.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: discount_id
+      source_by_row_type:
+        discount:
+          source_table: drv_discount
+          source_column: discount_id
+          how: own row
+        trigger:
+          source_table: drv_discount_trigger_item
+          source_column: discount_id
+          how: own row
+  - name: sales_category_name
+    description: The name of the sales category, as set up in Toast. This is the label that shows in reports.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: sales_category_config_name
+      source_by_row_type:
+        item:
+          source_table: drv_items
+          source_column: sales_category_name
+          how: own row
+        modifier:
+          source_table: drv_modifier
+          source_column: sales_category_name
+          how: own row
+  - name: menu_group_name
+    description: The name of the menu group, as set up in Toast. This is the label that shows in reports.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: menu_group_name
+      source_by_row_type:
+        item:
+          source_table: drv_items
+          source_column: menu_group_name
+          how: own row
+  - name: menu_item_name
+    description: The name of the menu item, as set up in Toast. This is the label that shows in reports.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: menu_item_name
+      source_by_row_type:
+        item:
+          source_table: drv_items
+          source_column: menu_item_name
+          how: own row
+  - name: drv_gross_sales
+    description: 'The menu price of this item if it really counts as a sale, otherwise 0. Calculation: i.item_price_before_discount IF COUNTABLE_ITEM(i) ELSE 0  -- Toast''s line total, not price x quantity'
+    data_type: NUMERIC
+    meta:
+      stands_for_sw_column: drv_gross_sales
+      source_by_row_type:
+        item:
+          source_table: drv_items
+          source_column: drv_gross_sales
+          how: own row
+  - name: drv_net_sales
+    description: 'Price minus this item''s own discounts. Calculation: drv_gross_sales - drv_discount'
+    data_type: NUMERIC
+    meta:
+      stands_for_sw_column: drv_net_sales
+      source_by_row_type:
+        item:
+          source_table: drv_items
+          source_column: drv_net_sales
+          how: own row
+  - name: items_refund_amount
+    description: The money refunded against the refund of this order line, in the restaurant's currency. Refunds are recorded against the original line, so this can be dated later than the sale itself.
+    data_type: NUMERIC
+    meta:
+      stands_for_sw_column: items_refund_amount
+      source_by_row_type:
+        item:
+          source_table: drv_items
+          source_column: items_refund_amount
+          how: own row
+  - name: item_tax_amount
+    description: The total tax on the order line (one menu item ordered on this check), summed across every tax rate that applied to it.
+    data_type: NUMERIC
+    meta:
+      stands_for_sw_column: item_tax_amount
+      source_by_row_type:
+        item:
+          source_table: drv_items
+          source_column: item_tax_amount
+          how: own row
+  - name: item_is_deferred
+    description: 'Yes/no: whether revenue for the order line (one menu item ordered on this check) is deferred rather than recognised now. Gift-card sales and deposits are deferred, so this flag separates
+      cash taken from revenue earned.'
+    data_type: BOOL
+    meta:
+      stands_for_sw_column: item_is_deferred
+      source_by_row_type:
+        item:
+          source_table: drv_items
+          source_column: item_is_deferred
+          how: own row
+  - name: drv_refund_date
+    description: 'The day the refund really happened. Toast reports a refund on that day, even if the sale was earlier. Calculation: p.payment_refund_business_date OF the in_payment p WHERE p.order_id =
+      i.order_id AND p.refund_transaction_id = i.item_refund_transaction_id, set when i.items_refund_amount > 0 OR i.items_refund_tax_amount > 0; else empty'
+    data_type: INT64
+    meta:
+      stands_for_sw_column: drv_refund_date
+      source_by_row_type:
+        item:
+          source_table: drv_items
+          source_column: drv_refund_date
+          how: own row
+  - name: drv_is_reportable_sales_category
+    description: 'Is this a real menu sale? Fee-like items (e.g. the bag fee) are marked no. Calculation: false IF drv_items.sales_category_name IN (''Taxes'', ''Donation'') ELSE true  (true when empty)'
+    data_type: BOOL
+    meta:
+      stands_for_sw_column: drv_is_reportable_sales_category
+      source_by_row_type:
+        item:
+          source_table: drv_items
+          source_column: drv_is_reportable_sales_category
+          how: own row
+  - name: modifier_name
+    description: The name of the chosen option as printed on the guest's receipt line. Staff overrides and free-text requests appear here, so it is a label rather than a key.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: modifier_name
+      source_by_row_type:
+        modifier:
+          source_table: drv_modifier
+          source_column: modifier_name
+          how: own row
+  - name: modifier_group_name
+    description: The name of the modifier group, as set up in Toast. This is the label that shows in reports.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: modifier_group_name
+      source_by_row_type:
+        modifier:
+          source_table: drv_modifier
+          source_column: modifier_group_name
+          how: own row
+  - name: tax_name
+    description: The configured name of the tax that was applied, for example 'VA STATE TAX' or 'Meals Tax'. It is the reporting label for one line of the tax breakdown.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: tax_name
+      source_by_row_type:
+        tax:
+          source_table: drv_tax
+          source_column: tax_name
+          how: own row
+  - name: tax_rate
+    description: The rate of this tax, as a decimal fraction, 0.05 means five per cent. It is the rate in force when the order was rung up, which is why it is stored on the line rather than only in the
+      tax-rate configuration.
+    data_type: NUMERIC
+    meta:
+      stands_for_sw_column: tax_rate
+      source_by_row_type:
+        tax:
+          source_table: drv_tax
+          source_column: tax_rate
+          how: own row
+  - name: drv_tax_jurisdiction_amount
+    description: 'The tax on this item for one tax jurisdiction. Calculation: t.tax_amount IF t IN ITEM_TAXES(i) AND LIVE_ITEM(i of t.item_id) ELSE 0  -- never rate x base'
+    data_type: NUMERIC
+    meta:
+      stands_for_sw_column: drv_tax_jurisdiction_amount
+      source_by_row_type:
+        tax:
+          source_table: drv_tax
+          source_column: drv_tax_jurisdiction_amount
+          how: own row
+  - name: is_tax_marketplace_remitted
+    description: 'Yes/no: whether a marketplace facilitator, a delivery app, collects and remits this tax instead of the restaurant. Where true the restaurant must not remit it again, so this flag is essential
+      to filing tax correctly on marketplace sales.'
+    data_type: BOOL
+    meta:
+      stands_for_sw_column: is_tax_marketplace_remitted
+      source_by_row_type:
+        tax:
+          source_table: drv_tax
+          source_column: is_tax_marketplace_remitted
+          how: own row
+  - name: discount_name
+    description: The name of the discount applied to this check, as set up in Toast. This is the label that shows in reports.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: discount_name
+      source_by_row_type:
+        discount:
+          source_table: drv_discount
+          source_column: discount_name
+          how: own row
+  - name: discount_type
+    description: How this discount was calculated, a fixed amount, a percentage, an open amount typed at the till, or a menu-item-level replacement price.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: discount_type
+      source_by_row_type:
+        discount:
+          source_table: drv_discount
+          source_column: discount_type
+          how: own row
+  - name: discount_loyalty_vendor
+    description: Which loyalty provider granted this benefit, Toast's own programme or an integrated outside provider.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: discount_loyalty_vendor
+      source_by_row_type:
+        discount:
+          source_table: drv_discount
+          source_column: discount_loyalty_vendor
+          how: own row
+  - name: discount_loyalty_reference_id
+    description: The short integer key Toast uses to point at the loyalty programme that granted this discount from inside the same menu payload. Menu items and modifier groups reference each other by this
+      number rather than by code.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: discount_loyalty_reference_id
+      source_by_row_type:
+        discount:
+          source_table: drv_discount
+          source_column: discount_loyalty_reference_id
+          how: own row
+  - name: trigger_item_id
+    description: A unique code that names the order line (menu item selection) that triggered this discount. It never changes and is never reused, so it is safe to match on.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: trigger_item_id
+      source_by_row_type:
+        trigger:
+          source_table: drv_discount_trigger_item
+          source_column: trigger_item_id
+          how: own row
+  - name: item_price_before_discount
+    description: The price of the order line (one menu item ordered on this check) before any discount was applied. The difference between this and price is the discount that landed on the line.
+    data_type: NUMERIC
+    meta:
+      stands_for_sw_column: item_price_before_discount (item rows)
+      source_by_row_type:
+        item:
+          source_table: drv_items
+          source_column: item_price_before_discount
+          how: own row
+  - name: modifier_price_before_discount
+    description: The price of the modifier (an option chosen on the parent order line) before any discount was applied. The difference between this and price is the discount that landed on the line.
+    data_type: NUMERIC
+    meta:
+      stands_for_sw_column: item_price_before_discount (modifier rows)
+      source_by_row_type:
+        modifier:
+          source_table: drv_modifier
+          source_column: modifier_price_before_discount
+          how: own row
+  - name: dining_option_name
+    description: The name of the dining option (a way an order is fulfilled, like Dine In or Delivery), as set up in Toast. This is the label that shows in reports.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: drv_dining_option_label
+      source_by_row_type:
+        item:
+          source_table: drv_order
+          source_column: dining_option_name
+          how: 'joined: drv_order on tenant_location_id + order_id'
+        tax:
+          source_table: drv_order
+          source_column: dining_option_name
+          how: 'joined: drv_order on tenant_location_id + order_id'
+        discount:
+          source_table: drv_order
+          source_column: dining_option_name
+          how: 'joined: drv_order on tenant_location_id + order_id'
+  - name: service_window_name
+    description: The name of the restaurant service (a meal period, like Lunch or Dinner), as set up in Toast. This is the label that shows in reports.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: drv_service_period_label
+      source_by_row_type:
+        item:
+          source_table: drv_order
+          source_column: service_window_name
+          how: 'joined: drv_order on tenant_location_id + order_id'
+        tax:
+          source_table: drv_order
+          source_column: service_window_name
+          how: 'joined: drv_order on tenant_location_id + order_id'
+        discount:
+          source_table: drv_order
+          source_column: service_window_name
+          how: 'joined: drv_order on tenant_location_id + order_id'
+  - name: drv_check_discount_allocation
+    description: 'A discount on the whole bill is not on any item, so it is the share Toast itself gave the line, read straight from the line''s price (to the cent). Calculation: 0 IF NOT COUNTABLE_ITEM(i);
+      ELSE IF i.item_unit_price is not empty: ROUND(i.item_price_before_discount - i.item_unit_price - drv_items.drv_discount, 2); ELSE (line has no price) for each live check-level discount d on the item''s
+      live check: pool = COUNTABLE items of the check whose i.menu_item_id is in ci.combo_item_id of d (else all COUNTABLE items of the check), base = i.item_price_before_discount - drv_items.drv_discount,
+      share = ROUND(d.discount_amount x base / SUM(base of pool), 2), leftover cent to the pool item with the lowest i.source_array_index; allocation = SUM of the item''s shares'
+    data_type: NUMERIC
+    meta:
+      stands_for_sw_column: drv_check_discount_allocation
+      source_by_row_type:
+        item:
+          source_table: drv_items
+          source_column: drv_check_discount_allocation
+          how: own row
+  - name: drv_discount_incl_check_share
+    description: 'Everything taken off this item: its own discounts plus its share of the whole-bill discounts. Calculation: drv_discount + drv_check_discount_allocation IF COUNTABLE_ITEM(i) ELSE 0'
+    data_type: NUMERIC
+    meta:
+      stands_for_sw_column: drv_discount_incl_check_share
+      source_by_row_type:
+        item:
+          source_table: drv_items
+          source_column: drv_discount_incl_check_share
+          how: own row
+  - name: drv_deferred_amount
+    description: 'Money taken now for something that will be delivered later (gift cards). Calculation: i.item_price_before_discount IF i.item_is_deferred is true AND LIVE_ITEM(i) ELSE 0'
+    data_type: NUMERIC
+    meta:
+      stands_for_sw_column: drv_deferred_amount
+      source_by_row_type:
+        item:
+          source_table: drv_items
+          source_column: drv_deferred_amount
+          how: own row
+  - name: drv_facilitator_base
+    description: 'Sales on which a delivery app (not the restaurant) collects and pays the tax. Calculation: i.item_price_before_discount IF COUNTABLE_ITEM(i) AND EXISTS t IN ITEM_TAXES(i) WITH t.is_tax_marketplace_remitted
+      is true ELSE 0'
+    data_type: NUMERIC
+    meta:
+      stands_for_sw_column: drv_facilitator_base
+      source_by_row_type:
+        item:
+          source_table: drv_items
+          source_column: drv_facilitator_base
+          how: own row
+  - name: drv_nontaxable_base
+    description: 'Sales that carried no tax at all. Calculation: i.item_price_before_discount - drv_discount - drv_check_discount_allocation IF COUNTABLE_ITEM(i) AND NO t IN ITEM_TAXES(i) HAS t.tax_amount
+      > 0 ELSE 0'
+    data_type: NUMERIC
+    meta:
+      stands_for_sw_column: drv_nontaxable_base
+      source_by_row_type:
+        item:
+          source_table: drv_items
+          source_column: drv_nontaxable_base
+          how: own row
+  - name: drv_refund_tax
+    description: 'The tax that was given back when this item was refunded. Calculation: i.items_refund_tax_amount IF LIVE_ITEM(i) ELSE 0  -- not zeroed for Waste'
+    data_type: NUMERIC
+    meta:
+      stands_for_sw_column: drv_refund_tax
+      source_by_row_type:
+        item:
+          source_table: drv_items
+          source_column: drv_refund_tax
+          how: own row
+  - name: drv_taxable_amount
+    description: 'The sales this tax was actually charged on (marketplace taxes counted once per remitter group, as Toast does). Calculation: i.item_price_before_discount - drv_items.drv_discount - drv_items.drv_check_discount_allocation
+      IF t IN ITEM_TAXES(i) AND COUNTABLE_ITEM(i) AND t.tax_amount > 0 AND (t.tax_type <> ''EXTERNAL'' OR t is the first (lowest t.appliedtaxes_sequence) such EXTERNAL row of the item with the same t.is_tax_marketplace_remitted);
+      ELSE 0'
+    data_type: NUMERIC
+    meta:
+      stands_for_sw_column: drv_taxable_amount
+      source_by_row_type:
+        tax:
+          source_table: drv_tax
+          source_column: drv_taxable_amount
+          how: own row
+  - name: drv_tax_refund_amount
+    description: 'The share of the refunded tax that belongs to this tax jurisdiction. Calculation: i.items_refund_tax_amount * t.tax_amount / SUM(t2.tax_amount OVER ITEM_TAXES(i))  (i of t.item_id; 0 when
+      that sum = 0)'
+    data_type: NUMERIC
+    meta:
+      stands_for_sw_column: drv_tax_refund_amount
+      source_by_row_type:
+        tax:
+          source_table: drv_tax
+          source_column: drv_tax_refund_amount
+          how: own row
+  - name: drv_tax_refund_date
+    description: 'The day the tax was given back. Calculation: p.payment_refund_business_date WHERE p.order_id = i.order_id AND p.refund_transaction_id = i.item_refund_transaction_id, IF drv_tax_refund_amount
+      > 0 OR (COUNTABLE_ITEM(i) AND i.items_refund_amount > 0 AND t.tax_amount = 0) ELSE empty'
+    data_type: INT64
+    meta:
+      stands_for_sw_column: drv_tax_refund_date
+      source_by_row_type:
+        tax:
+          source_table: drv_tax
+          source_column: drv_tax_refund_date
+          how: own row
+  - name: drv_is_live_discount
+    description: 'Does this discount really count? Adding these up gives the discount count Toast shows. Calculation: 1 IF the drv_discount condition above is true ELSE 0'
+    data_type: INT64
+    meta:
+      stands_for_sw_column: drv_is_live_discount
+      source_by_row_type:
+        discount:
+          source_table: drv_discount
+          source_column: drv_is_live_discount
+          how: own row
+  - name: drv_discount_order_flag
+    description: 'Marks the first time a discount was used on an order, so adding them up counts ORDERS that used it, not uses. Calculation: 1 IF drv_is_live_discount = 1 AND this is the first live row
+      of its (d.order_id, level = check if d.item_id IS NULL else item, d.discount_name) in (c.check_sequence, d.source_array_index) order ELSE 0'
+    data_type: INT64
+    meta:
+      stands_for_sw_column: drv_discount_order_flag
+      source_by_row_type:
+        discount:
+          source_table: drv_discount
+          source_column: drv_discount_order_flag
+          how: own row
+  - name: drv_countable_quantity
+    description: 'How many units were really sold (voided, deferred and waste lines do not count). Calculation: i.item_quantity IF COUNTABLE_ITEM(i) ELSE 0'
+    data_type: NUMERIC
+    meta:
+      stands_for_sw_column: drv_countable_quantity
+      source_by_row_type:
+        item:
+          source_table: drv_items
+          source_column: drv_countable_quantity
+          how: own row
+  - name: drv_countable_tax_amount
+    description: 'The tax charged on this item if it really counts as a sale. Calculation: SUM(t.tax_amount) OVER ITEM_TAXES(i) IF COUNTABLE_ITEM(i) ELSE 0'
+    data_type: NUMERIC
+    meta:
+      stands_for_sw_column: drv_countable_tax_amount
+      source_by_row_type:
+        item:
+          source_table: drv_items
+          source_column: drv_countable_tax_amount
+          how: own row
+  - name: drv_taxable_refund_amount
+    description: 'The sales that were taxed and then refunded. Toast takes them out of "Taxable amount" on the refund day. Calculation: drv_taxable_amount IF drv_tax_refund_amount > 0; ELSE i.items_refund_amount
+      IF COUNTABLE_ITEM(i) AND i.items_refund_amount > 0 AND t.tax_amount = 0 (tax-exempt line); ELSE 0'
+    data_type: NUMERIC
+    meta:
+      stands_for_sw_column: drv_taxable_refund_amount
+      source_by_row_type:
+        tax:
+          source_table: drv_tax
+          source_column: drv_taxable_refund_amount
+          how: own row
+  - name: item_name
+    description: The name of the item as printed on the guest's receipt line. Staff can override it at the till and special requests appear here as free text, so it is the guest-facing label rather than
+      a reliable menu-item key, join through item.code for that.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: item_name
+      source_by_row_type:
+        item:
+          source_table: drv_items
+          source_column: item_name
+          how: own row
+  - name: item_type
+    description: What kind of order line this is, NONE for a normal item, SPECIAL_REQUEST for free text typed by staff, OPEN_ITEM for an open-price item, GIFT_CARD for a gift-card sale. Special requests
+      carry no revenue, so this column is required to keep them out of item counts.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: selection_type (item rows)
+      source_by_row_type:
+        item:
+          source_table: drv_items
+          source_column: item_type
+          how: own row
+  - name: parent_item_type
+    description: What kind of modifier line this is. NONE is the normal case; other values mark free-text requests and open-price entries, which carry no menu item and must be excluded from item-level analysis.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: selection_type (modifier rows)
+      source_by_row_type:
+        modifier:
+          source_table: drv_modifier
+          source_column: parent_item_type
+          how: own row
+  - name: drv_is_open_item
+    description: 'Toast''s own Menu (Item) Breakdown report leaves these lines out entirely, even though they carry a real sales category and count in the Sales Category Summary. Found while matching a
+      Menu Breakdown export: a $40.19 / 3-unit gap in Food traced to 3 such lines sharing the same generic "Open Food" catalog entry. Calculation: 1 IF i.item_type = ''OPEN_ITEM'' ELSE 0  -- item keyed
+      in by hand, not picked from the menu; Toast''s Menu Breakdown leaves these out'
+    data_type: INT64
+    meta:
+      stands_for_sw_column: drv_is_open_item
+      source_by_row_type:
+        item:
+          source_table: drv_items
+          source_column: drv_is_open_item
+          how: own row
+        tax:
+          source_table: drv_items
+          source_column: drv_is_open_item
+          how: 'joined: drv_items on tenant_location_id + item_id'
+  - name: menu_name
+    description: The name of the menu this record was under.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: drv_menu_name
+      source_by_row_type:
+        item:
+          source_table: drv_items
+          source_column: menu_name
+          how: own row
+        tax:
+          source_table: drv_items
+          source_column: menu_name
+          how: 'joined: drv_items on tenant_location_id + item_id'
+  - name: drv_sales_status
+    description: 'Whether the item was a real sale, wasted, voided or deferred, as one filterable value. Calculation: ''VOIDED'' IF NOT LIVE_ITEM(i); ELSE ''WASTE'' IF WASTE_ITEM(i); ELSE ''DEFERRED'' IF
+      i.item_is_deferred is true; ELSE ''SOLD'''
+    data_type: STRING
+    meta:
+      stands_for_sw_column: drv_sales_status
+      source_by_row_type:
+        item:
+          source_table: drv_items
+          source_column: drv_sales_status
+          how: own row
+        modifier:
+          source_table: drv_modifier
+          source_column: drv_sales_status
+          how: own row
+- name: sem_order_payments
+  description: One row per payment (drv_payment).
+  meta:
+    grain: payment
+    built_from:
+    - drv_payment
+    - drv_order
+    joins:
+    - drv_order on tenant_location_id + order_id
+  data_tests:
+  - dbt_utils.unique_combination_of_columns:
+      combination_of_columns:
+      - tenant_location_id
+      - payment_id
+  - dbt_utils.equal_rowcount:
+      compare_model: ref('drv_payment')
+  columns:
+  - name: organisation_id
+    description: Neon id of the organisation (group) that owns the tenant. Same on every row of one tenant.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: (tenant details)
+      source_table: drv_payment
+      source_column: organisation_id
+      how: own row
+  - name: organisation_slug
+    description: Short fixed name of the organisation (e.g. rasa-group).
+    data_type: STRING
+    meta:
+      stands_for_sw_column: (tenant details)
+      source_table: drv_payment
+      source_column: organisation_slug
+      how: own row
+  - name: tenant_id
+    description: Neon id of the tenant (customer) the row belongs to.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: (tenant details)
+      source_table: drv_payment
+      source_column: tenant_id
+      how: own row
+    data_tests:
+    - not_null
+  - name: tenant_slug
+    description: Short fixed name of the tenant (e.g. tenant_rasa) - the same as the GCS tenant folder.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: (tenant details)
+      source_table: drv_payment
+      source_column: tenant_slug
+      how: own row
+  - name: store_location_id
+    description: Which restaurant this row is for. Every per-restaurant total depends on it.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: (tenant details)
+      source_table: drv_payment
+      source_column: store_location_id
+      how: own row
+    data_tests:
+    - not_null
+  - name: tenant_location_id
+    description: 'Neon id of the tenant store (tenant_locations.id). Never changes and never repeats, so every join between tables uses it. Not inside the Toast record: the loader sets it from the GCS location
+      folder via the store''s location_sources row.'
+    data_type: STRING
+    meta:
+      stands_for_sw_column: (tenant details)
+      source_table: drv_payment
+      source_column: tenant_location_id
+      how: own row
+    data_tests:
+    - not_null
+  - name: store_timezone
+    description: The restaurant's own time zone (Neon tenant_locations.timezone, e.g. America/New_York). Use it to turn the UTC timestamps into the store's local time and business day.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: (tenant details)
+      source_table: drv_payment
+      source_column: store_timezone
+      how: own row
+  - name: system_id
+    description: Neon id of the kind of system the data came from (e.g. POS).
+    data_type: STRING
+    meta:
+      stands_for_sw_column: (tenant details)
+      source_table: drv_payment
+      source_column: system_id
+      how: own row
+  - name: system_slug
+    description: Short fixed name of the system (e.g. pos).
+    data_type: STRING
+    meta:
+      stands_for_sw_column: (tenant details)
+      source_table: drv_payment
+      source_column: system_slug
+      how: own row
+  - name: source_id
+    description: Neon id of the product the data came from (e.g. Toast).
+    data_type: STRING
+    meta:
+      stands_for_sw_column: (tenant details)
+      source_table: drv_payment
+      source_column: source_id
+      how: own row
+  - name: source_slug
+    description: Short fixed name of the source (e.g. toast) - the same as the GCS source folder.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: (tenant details)
+      source_table: drv_payment
+      source_column: source_slug
+      how: own row
+  - name: source_timezone
+    description: The time zone the source sends its timestamps in (Neon sources.data_timezone). Toast sends UTC - every Toast timestamp ends in +0000.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: (tenant details)
+      source_table: drv_payment
+      source_column: source_timezone
+      how: own row
+  - name: source_entity_id
+    description: Neon id of the feed (catalog entity) the row came from, e.g. Toast orders.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: (tenant details)
+      source_table: drv_payment
+      source_column: source_entity_id
+      how: own row
+  - name: entity_name
+    description: Name of the feed the row came from (e.g. orders) - the same as the GCS entity folder.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: (tenant details)
+      source_table: drv_payment
+      source_column: entity_name
+      how: own row
+  - name: _run_id
+    description: Id of the nightly run that fetched this row - written by the ETL into every record; the same as Neon connector_runs.run_id.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: (tenant details)
+      source_table: drv_payment
+      source_column: _run_id
+      how: own row
+  - name: _extracted_at
+    description: When the ETL fetched the record from Toast.
+    data_type: TIMESTAMP
+    meta:
+      stands_for_sw_column: (tenant details)
+      source_table: drv_payment
+      source_column: _extracted_at
+      how: own row
+  - name: _source_type
+    description: Source written by the ETL into every record (e.g. toast).
+    data_type: STRING
+    meta:
+      stands_for_sw_column: (tenant details)
+      source_table: drv_payment
+      source_column: _source_type
+      how: own row
+  - name: _load_mode
+    description: 'How the record was loaded: incremental, backfill or invalid.'
+    data_type: STRING
+    meta:
+      stands_for_sw_column: (tenant details)
+      source_table: drv_payment
+      source_column: _load_mode
+      how: own row
+  - name: payment_id
+    description: A unique code that names the payment taken against this check. It never changes and is never reused, so it is safe to match on.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: payment_id
+      source_table: drv_payment
+      source_column: payment_id
+      how: own row
+    data_tests:
+    - not_null
+  - name: check_id
+    description: A unique code that names the check (the guest-facing bill inside the order). It never changes and is never reused, so it is safe to match on.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: check_id
+      source_table: drv_payment
+      source_column: check_id
+      how: own row
+  - name: order_id
+    description: A unique code that names this order. Every check, item, add-on, and payment for the order points back to this code, and it is what order counts are based on.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: order_id
+      source_table: drv_payment
+      source_column: order_id
+      how: own row
+    data_tests:
+    - not_null
+    - relationships:
+        to: ref('drv_order')
+        field: order_id
+  - name: order_business_date
+    description: 'The restaurant''s trading day for this order, as an integer in YYYYMMDD form. It is not the calendar date: an order rung up at 1am is booked to the previous trading day, using the location''s
+      closeout hour. Every daily figure must group on this rather than on a timestamp''s date.'
+    data_type: INT64
+    meta:
+      stands_for_sw_column: drv_business_date
+      source_table: drv_order
+      source_column: order_business_date
+      how: 'joined: drv_order on tenant_location_id + order_id'
+  - name: payment_type
+    description: How this payment was tendered, CREDIT for a card, CASH for cash, OTHER for an alternate tender such as a marketplace payout, GIFTCARD for stored value. It is the first split in any tender-mix
+      report.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: payment_type
+      source_table: drv_payment
+      source_column: payment_type
+      how: own row
+  - name: other_payment_name
+    description: Name of the alternative payment type (e.g. DoorDash, Comp Meal).
+    data_type: STRING
+    meta:
+      stands_for_sw_column: other_payment_name
+      source_table: drv_payment
+      source_column: other_payment_name
+      how: own row
+  - name: payment_amount
+    description: The money taken on this payment, excluding the tip. A check settled across several tenders has one row per tender, so these must be summed to reconcile against the check total.
+    data_type: NUMERIC
+    meta:
+      stands_for_sw_column: payment_amount
+      source_table: drv_payment
+      source_column: payment_amount
+      how: own row
+  - name: drv_tips
+    description: 'The tip on this payment, only once the payment really went through. Calculation: p.payment_tip_amount IF p.payment_status = ''CAPTURED'' ELSE 0'
+    data_type: NUMERIC
+    meta:
+      stands_for_sw_column: drv_tips
+      source_table: drv_payment
+      source_column: drv_tips
+      how: own row
+  - name: drv_refund_net
+    description: 'The money given back on this payment, tax included. Calculation: p.payment_refund_amount IF p.payment_status <> ''VOIDED'' AND p.payment_refund_amount is not empty ELSE 0  -- includes
+      tax (historical name)'
+    data_type: NUMERIC
+    meta:
+      stands_for_sw_column: drv_refund_net
+      source_table: drv_payment
+      source_column: drv_refund_net
+      how: own row
+  - name: payment_refund_business_date
+    description: The restaurant's trading day on which the refund was issued, as an integer in YYYYMMDD form. Refunds routinely land on a later day than the sale, which is why they are reported separately
+      rather than netted off the original day.
+    data_type: INT64
+    meta:
+      stands_for_sw_column: drv_refund_date
+      source_table: drv_payment
+      source_column: payment_refund_business_date
+      how: own row
+  - name: drv_tip_refund
+    description: 'The part of the refund that was a tip. Calculation: p.payment_refund_tip_amount IF p.payment_status <> ''VOIDED'' AND p.payment_refund_amount is not empty ELSE 0'
+    data_type: NUMERIC
+    meta:
+      stands_for_sw_column: drv_tip_refund
+      source_table: drv_payment
+      source_column: drv_tip_refund
+      how: own row
+  - name: card_type
+    description: The card scheme used for this payment, such as VISA or MASTERCARD. It is the column to group by for interchange and scheme-mix analysis.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: card_type
+      source_table: drv_payment
+      source_column: card_type
+      how: own row
+  - name: payment_processing_fee_amount
+    description: The card-processing fee Toast charged on this payment when it was taken. It is the restaurant's cost of acceptance, not something the guest paid, so it belongs in cost analysis rather than
+      in revenue.
+    data_type: NUMERIC
+    meta:
+      stands_for_sw_column: payment_processing_fee_amount
+      source_table: drv_payment
+      source_column: payment_processing_fee_amount
+      how: own row
+  - name: paid_business_date
+    description: The restaurant's trading day on which this payment was taken, as an integer in YYYYMMDD form.
+    data_type: INT64
+    meta:
+      stands_for_sw_column: paid_business_date
+      source_table: drv_payment
+      source_column: paid_business_date
+      how: own row
+  - name: payment_status
+    description: How far this payment got, AUTHORIZED, CAPTURED, DENIED or VOIDED. Only captured payments represent money actually taken, so this is a mandatory filter when reconciling to the bank.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: payment_status
+      source_table: drv_payment
+      source_column: payment_status
+      how: own row
+  - name: drv_is_captured
+    description: 'Did the money actually get collected? Calculation: 1 IF p.payment_status = ''CAPTURED'' ELSE 0'
+    data_type: INT64
+    meta:
+      stands_for_sw_column: drv_is_captured
+      source_table: drv_payment
+      source_column: drv_is_captured
+      how: own row
+  - name: drv_payment_count
+    description: 'Counts as one payment for Toast''s payment counts. Calculation: 1 IF LIVE_PAYMENT(p) ELSE 0'
+    data_type: INT64
+    meta:
+      stands_for_sw_column: drv_payment_count
+      source_table: drv_payment
+      source_column: drv_payment_count
+      how: own row
+  - name: drv_payment_type_group
+    description: 'The plain-English payment group Toast prints. Calculation: CASE p.payment_type WHEN ''CREDIT'' THEN ''Credit/debit'' WHEN ''CASH'' THEN ''Cash'' WHEN ''GIFTCARD'' THEN ''Gift Card'' WHEN
+      ''OTHER'' THEN ''Other'' ELSE p.payment_type END'
+    data_type: STRING
+    meta:
+      stands_for_sw_column: drv_payment_type_group
+      source_table: drv_payment
+      source_column: drv_payment_type_group
+      how: own row
+  - name: drv_payment_sub_type
+    description: 'VISA / MASTERCARD for cards, or the partner name (DoorDash, Ez Cater...) for other payments. Calculation: p.card_type IF not empty, ELSE drv_payment.other_payment_name (from in_config_alt_payment_type
+      on other_payment_id), ELSE empty'
+    data_type: STRING
+    meta:
+      stands_for_sw_column: drv_payment_sub_type
+      source_table: drv_payment
+      source_column: drv_payment_sub_type
+      how: own row
+  - name: drv_payment_tax_amount
+    description: 'Toast does not store tax per payment, so the bill''s tax is shared between its payments in proportion to what each paid. Calculation: c.check_tax_amount * p.payment_amount / SUM(p2.payment_amount
+      WHERE p2.check_id = p.check_id AND LIVE_PAYMENT(p2)), IF LIVE_CHECK(c) AND LIVE_PAYMENT(p) ELSE 0  -- c = the payment''s check'
+    data_type: NUMERIC
+    meta:
+      stands_for_sw_column: drv_payment_tax_amount
+      source_table: drv_payment
+      source_column: drv_payment_tax_amount
+      how: own row
+  - name: drv_refund_tax_amount
+    description: 'How much of this refund was tax. Calculation: SUM(i.items_refund_tax_amount) WHERE i.order_id = p.order_id AND i.item_refund_transaction_id = p.refund_transaction_id, IF p.payment_refund_amount
+      is not empty ELSE 0'
+    data_type: NUMERIC
+    meta:
+      stands_for_sw_column: drv_refund_tax_amount
+      source_table: drv_payment
+      source_column: drv_refund_tax_amount
+      how: own row
+  - name: drv_refund_net_of_tax
+    description: 'The refund without the tax - the number Toast calls Sales refunds. Calculation: drv_refund_net - drv_refund_tax_amount'
+    data_type: NUMERIC
+    meta:
+      stands_for_sw_column: drv_refund_net_of_tax
+      source_table: drv_payment
+      source_column: drv_refund_net_of_tax
+      how: own row
+  - name: drv_refund_and_tip_amount
+    description: 'Refund plus the tip that was refunded with it - the Refunds column of Toast''s payments summary. Calculation: drv_refund_net + drv_tip_refund IF p.payment_refund_amount is not empty ELSE
+      0'
+    data_type: NUMERIC
+    meta:
+      stands_for_sw_column: drv_refund_and_tip_amount
+      source_table: drv_payment
+      source_column: drv_refund_and_tip_amount
+      how: own row
+  - name: drv_custom_refund_amount
+    description: 'Refund money with no line behind it (a manager refunded an amount, not an item). Toast shows it as Custom Amount Refunds. Calculation: per refund transaction X = p.refund_transaction_id
+      (payments with a refund): v = SUM(p.payment_refund_amount WHERE refund_transaction_id = X) - SUM(i.items_refund_amount WHERE i.item_refund_transaction_id = X) - SUM(s.service_charge_refund_amount
+      WHERE s.service_charge_refund_transaction_id = X) - SUM(drv_payment.drv_refund_tax_amount WHERE refund_transaction_id = X); IF v > 0 put v on the payment of X with the lowest p.payment_sequence, 0
+      on the others'
+    data_type: NUMERIC
+    meta:
+      stands_for_sw_column: drv_custom_refund_amount
+      source_table: drv_payment
+      source_column: drv_custom_refund_amount
+      how: own row
+  - name: dining_option_name
+    description: The name of the dining option (a way an order is fulfilled, like Dine In or Delivery), as set up in Toast. This is the label that shows in reports.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: drv_dining_option_label
+      source_table: drv_order
+      source_column: dining_option_name
+      how: 'joined: drv_order on tenant_location_id + order_id'
+  - name: service_window_name
+    description: The name of the restaurant service (a meal period, like Lunch or Dinner), as set up in Toast. This is the label that shows in reports.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: drv_service_period_label
+      source_table: drv_order
+      source_column: service_window_name
+      how: 'joined: drv_order on tenant_location_id + order_id'
+  - name: drv_gratuity_amount
+    description: 'The gratuity this payment carried; Toast shows it in the payments Grat column and leaves it out of Amount. Calculation: SUM(s.service_charge_amount WHERE s.check_id = p.check_id AND s.is_check_service_charge_gratuity
+      is true AND s.check_service_charge_payment_id = p.payment_id)  +  for gratuity charges of the check with empty check_service_charge_payment_id: charge amount x p.payment_amount / SUM(payment_amount
+      of the check''s LIVE_PAYMENT payments) - only on LIVE_PAYMENT(p)'
+    data_type: NUMERIC
+    meta:
+      stands_for_sw_column: drv_gratuity_amount
+      source_table: drv_payment
+      source_column: drv_gratuity_amount
+      how: own row
+  - name: revenue_center_name
+    description: The name of the revenue centre, as set up in Toast. This is the label that shows in reports.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: revenue_center_name
+      source_table: drv_order
+      source_column: revenue_center_name
+      how: 'joined: drv_order on tenant_location_id + order_id'
+  - name: drv_paid_in_advance_amount
+    description: 'Money that came in BEFORE the order''s own day (a deposit or pre-payment). Calculation: p.payment_amount + p.payment_tip_amount IF LIVE_PAYMENT(p) AND p.paid_business_date < o.order_business_date
+      (o of p.order_id) ELSE 0'
+    data_type: NUMERIC
+    meta:
+      stands_for_sw_column: drv_paid_in_advance_amount
+      source_table: drv_payment
+      source_column: drv_paid_in_advance_amount
+      how: own row
+- name: sem_labor
+  description: 'One row per shift: drv_labor rows with drv_record_type = ''shift'', a shift repeated per break kept once.'
+  meta:
+    grain: shift
+    built_from:
+    - drv_labor
+    filter: drv_record_type = 'shift'; one row per tenant_location_id + shift_id
+    note: labor_business_date is text as Toast sends it - compare it as a number
+  data_tests:
+  - dbt_utils.unique_combination_of_columns:
+      combination_of_columns:
+      - tenant_location_id
+      - shift_id
+  columns:
+  - name: organisation_id
+    description: Neon id of the organisation (group) that owns the tenant. Same on every row of one tenant.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: (tenant details)
+      source_table: drv_labor
+      source_column: organisation_id
+      how: own row
+  - name: organisation_slug
+    description: Short fixed name of the organisation (e.g. rasa-group).
+    data_type: STRING
+    meta:
+      stands_for_sw_column: (tenant details)
+      source_table: drv_labor
+      source_column: organisation_slug
+      how: own row
+  - name: tenant_id
+    description: Neon id of the tenant (customer) the row belongs to.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: (tenant details)
+      source_table: drv_labor
+      source_column: tenant_id
+      how: own row
+    data_tests:
+    - not_null
+  - name: tenant_slug
+    description: Short fixed name of the tenant (e.g. tenant_rasa) - the same as the GCS tenant folder.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: (tenant details)
+      source_table: drv_labor
+      source_column: tenant_slug
+      how: own row
+  - name: store_location_id
+    description: The Toast restaurant/location guid this record belongs to -- shared name and meaning on every record_type, passthrough of in_laborTimeEntry / in_laborEmployee / in_laborJob's own store_location_id.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: (tenant details)
+      source_table: drv_labor
+      source_column: store_location_id
+      how: own row
+    data_tests:
+    - not_null
+  - name: tenant_location_id
+    description: 'Neon id of the tenant store (tenant_locations.id). Never changes and never repeats, so every join between tables uses it. Not inside the Toast record: the loader sets it from the GCS location
+      folder via the store''s location_sources row.'
+    data_type: STRING
+    meta:
+      stands_for_sw_column: (tenant details)
+      source_table: drv_labor
+      source_column: tenant_location_id
+      how: own row
+    data_tests:
+    - not_null
+  - name: store_timezone
+    description: The restaurant's own time zone (Neon tenant_locations.timezone, e.g. America/New_York). Use it to turn the UTC timestamps into the store's local time and business day.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: (tenant details)
+      source_table: drv_labor
+      source_column: store_timezone
+      how: own row
+  - name: system_id
+    description: Neon id of the kind of system the data came from (e.g. POS).
+    data_type: STRING
+    meta:
+      stands_for_sw_column: (tenant details)
+      source_table: drv_labor
+      source_column: system_id
+      how: own row
+  - name: system_slug
+    description: Short fixed name of the system (e.g. pos).
+    data_type: STRING
+    meta:
+      stands_for_sw_column: (tenant details)
+      source_table: drv_labor
+      source_column: system_slug
+      how: own row
+  - name: source_id
+    description: Neon id of the product the data came from (e.g. Toast).
+    data_type: STRING
+    meta:
+      stands_for_sw_column: (tenant details)
+      source_table: drv_labor
+      source_column: source_id
+      how: own row
+  - name: source_slug
+    description: Short fixed name of the source (e.g. toast) - the same as the GCS source folder.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: (tenant details)
+      source_table: drv_labor
+      source_column: source_slug
+      how: own row
+  - name: source_timezone
+    description: The time zone the source sends its timestamps in (Neon sources.data_timezone). Toast sends UTC - every Toast timestamp ends in +0000.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: (tenant details)
+      source_table: drv_labor
+      source_column: source_timezone
+      how: own row
+  - name: source_entity_id
+    description: Neon id of the feed (catalog entity) the row came from, e.g. Toast orders.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: (tenant details)
+      source_table: drv_labor
+      source_column: source_entity_id
+      how: own row
+  - name: entity_name
+    description: Name of the feed the row came from (e.g. orders) - the same as the GCS entity folder.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: (tenant details)
+      source_table: drv_labor
+      source_column: entity_name
+      how: own row
+  - name: _run_id
+    description: Id of the nightly run that fetched this row - written by the ETL into every record; the same as Neon connector_runs.run_id.
+    data_type: STRING
+    meta:
+      stands_for_sw_column: (tenant details)
+      source_table: drv_labor
+      source_column: _run_id
+      how: own row
+  - name: _extracted_at
+    description: When the ETL fetched the record from Toast.
+    data_type: TIMESTAMP
+    meta:
+      stands_for_sw_column: (tenant details)
+      source_table: drv_labor
+      source_column: _extracted_at
+      how: own row
+  - name: _source_type
+    description: Source written by the ETL into every record (e.g. toast).
+    data_type: STRING
+    meta:
+      stands_for_sw_column: (tenant details)
+      source_table: drv_labor
+      source_column: _source_type
+      how: own row
+  - name: _load_mode
+    description: 'How the record was loaded: incremental, backfill or invalid.'
+    data_type: STRING
+    meta:
+      stands_for_sw_column: (tenant details)
+      source_table: drv_labor
+      source_column: _load_mode
+      how: own row
+  - name: shift_id
+    description: 'The shift''s own identifier, passthrough of in_laborTimeEntry.time_entry_id: The Labor API''s own unique identifier (guid) for this time entry (shift).'
+    data_type: STRING
+    meta:
+      stands_for_sw_column: shift_id
+      source_table: drv_labor
+      source_column: shift_id
+      how: own row
+    data_tests:
+    - not_null
+  - name: labor_business_date
+    description: 'Passthrough of in_laborTimeEntry.labor_business_date (shift-only; blank on employee/job rows): The Toast business date this shift belongs to (YYYYMMDD), used to window time entries by
+      day.'
+    data_type: STRING
+    meta:
+      stands_for_sw_column: labor_business_date
+      source_table: drv_labor
+      source_column: labor_business_date
+      how: own row
+  - name: employee_id
+    description: 'The employee this row is about: on a ''shift'' row, the guid of the employee who worked it (in_laborTimeEntry.employee_id); on an ''employee'' row, the employee''s own identity (in_laborEmployee.employee_id);
+      blank on ''job'' rows.'
+    data_type: STRING
+    meta:
+      stands_for_sw_column: employee_id
+      source_table: drv_labor
+      source_column: employee_id
+      how: own row
+  - name: job_id
+    description: 'The job this row is about: on a ''shift'' row, the guid of the job worked (in_laborTimeEntry.job_id); on a ''job'' row, the job''s own identity (in_laborJob.job_id); blank on ''employee''
+      rows.'
+    data_type: STRING
+    meta:
+      stands_for_sw_column: job_id
+      source_table: drv_labor
+      source_column: job_id
+      how: own row
+  - name: employee_clock_in_at
+    description: 'Passthrough of in_laborTimeEntry.employee_clock_in_at (shift-only; blank on employee/job rows): Timestamp the employee clocked in for this shift (inDate).'
+    data_type: TIMESTAMP
+    meta:
+      stands_for_sw_column: employee_clock_in_at
+      source_table: drv_labor
+      source_column: employee_clock_in_at
+      how: own row
+  - name: labor_clock_out_at
+    description: 'Passthrough of in_laborTimeEntry.labor_clock_out_at (shift-only; blank on employee/job rows): Timestamp the employee clocked out of this shift (outDate).'
+    data_type: TIMESTAMP
+    meta:
+      stands_for_sw_column: labor_clock_out_at
+      source_table: drv_labor
+      source_column: labor_clock_out_at
+      how: own row
+  - name: employee_regular_hours
+    description: 'Passthrough of in_laborTimeEntry.employee_regular_hours (shift-only; blank on employee/job rows): Regular (non-overtime) hours worked on this shift, as reported by Toast.'
+    data_type: NUMERIC
+    meta:
+      stands_for_sw_column: employee_regular_hours
+      source_table: drv_labor
+      source_column: employee_regular_hours
+      how: own row
+  - name: labor_overtime_hours
+    description: 'Passthrough of in_laborTimeEntry.labor_overtime_hours (shift-only; blank on employee/job rows): Overtime hours worked on this shift, as reported by Toast.'
+    data_type: NUMERIC
+    meta:
+      stands_for_sw_column: labor_overtime_hours
+      source_table: drv_labor
+      source_column: labor_overtime_hours
+      how: own row
+  - name: employee_hourly_wage
+    description: 'Passthrough of in_laborTimeEntry.employee_hourly_wage (shift-only; blank on employee/job rows): The employee''s hourly wage rate that applied to this shift.'
+    data_type: NUMERIC
+    meta:
+      stands_for_sw_column: employee_hourly_wage
+      source_table: drv_labor
+      source_column: employee_hourly_wage
+      how: own row
+  - name: employee_cash_tips_declared_amount
+    description: 'Passthrough of in_laborTimeEntry.employee_cash_tips_declared_amount (shift-only; blank on employee/job rows): Cash tips the employee self-declared for this shift.'
+    data_type: NUMERIC
+    meta:
+      stands_for_sw_column: employee_cash_tips_declared_amount
+      source_table: drv_labor
+      source_column: employee_cash_tips_declared_amount
+      how: own row
+  - name: employee_non_cash_tips_amount
+    description: 'Passthrough of in_laborTimeEntry.employee_non_cash_tips_amount (shift-only; blank on employee/job rows): Non-cash (credit-card, etc.) tips attributed to this shift.'
+    data_type: NUMERIC
+    meta:
+      stands_for_sw_column: employee_non_cash_tips_amount
+      source_table: drv_labor
+      source_column: employee_non_cash_tips_amount
+      how: own row
+  - name: cash_gratuity_service_charge_amount
+    description: 'Passthrough of in_laborTimeEntry.cash_gratuity_service_charge_amount (shift-only; blank on employee/job rows): Cash portion of gratuity/service-charge amounts attributed to this shift.'
+    data_type: NUMERIC
+    meta:
+      stands_for_sw_column: cash_gratuity_service_charge_amount
+      source_table: drv_labor
+      source_column: cash_gratuity_service_charge_amount
+      how: own row
+  - name: non_cash_gratuity_service_charge_amount
+    description: 'Passthrough of in_laborTimeEntry.non_cash_gratuity_service_charge_amount (shift-only; blank on employee/job rows): Non-cash portion of gratuity/service-charge amounts attributed to this
+      shift.'
+    data_type: NUMERIC
+    meta:
+      stands_for_sw_column: non_cash_gratuity_service_charge_amount
+      source_table: drv_labor
+      source_column: non_cash_gratuity_service_charge_amount
+      how: own row
+  - name: employee_tips_withheld_amount
+    description: 'Passthrough of in_laborTimeEntry.employee_tips_withheld_amount (shift-only; blank on employee/job rows): Amount of tips withheld from the employee on this shift.'
+    data_type: NUMERIC
+    meta:
+      stands_for_sw_column: employee_tips_withheld_amount
+      source_table: drv_labor
+      source_column: employee_tips_withheld_amount
+      how: own row
+  - name: time_entry_cash_sales_amount
+    description: 'Passthrough of in_laborTimeEntry.time_entry_cash_sales_amount (shift-only; blank on employee/job rows): Cash sales attributed to this shift/employee.'
+    data_type: NUMERIC
+    meta:
+      stands_for_sw_column: time_entry_cash_sales_amount
+      source_table: drv_labor
+      source_column: time_entry_cash_sales_amount
+      how: own row
+  - name: time_entry_non_cash_sales_amount
+    description: 'Passthrough of in_laborTimeEntry.time_entry_non_cash_sales_amount (shift-only; blank on employee/job rows): Non-cash sales attributed to this shift/employee.'
+    data_type: NUMERIC
+    meta:
+      stands_for_sw_column: time_entry_non_cash_sales_amount
+      source_table: drv_labor
+      source_column: time_entry_non_cash_sales_amount
+      how: own row
+  - name: employee_name
+    description: 'Calculation: in_labor_employee.employee_last_name || '', '' || employee_first_name WHERE employee_id = in_labor_time_entry.employee_id'
+    data_type: STRING
+    meta:
+      stands_for_sw_column: employee_name
+      source_table: drv_labor
+      source_column: employee_name
+      how: own row
+  - name: job_title
+    description: 'Calculation: shift rows: in_labor_job.job_title / job_code WHERE job_id = in_labor_time_entry.job_id; job rows: their own'
+    data_type: STRING
+    meta:
+      stands_for_sw_column: job_title
+      source_table: drv_labor
+      source_column: job_title
+      how: own row
+  - name: job_code
+    description: 'Calculation: shift rows: in_labor_job.job_title / job_code WHERE job_id = in_labor_time_entry.job_id; job rows: their own'
+    data_type: STRING
+    meta:
+      stands_for_sw_column: job_code
+      source_table: drv_labor
+      source_column: job_code
+      how: own row
+  - name: drv_regular_pay
+    description: 'Calculation: ROUND(employee_regular_hours * employee_hourly_wage, 2)'
+    data_type: STRING
+    meta:
+      stands_for_sw_column: drv_regular_pay
+      source_table: drv_labor
+      source_column: drv_regular_pay
+      how: own row
+  - name: drv_total_sales
+    description: 'Calculation: time_entry_cash_sales_amount + time_entry_non_cash_sales_amount'
+    data_type: STRING
+    meta:
+      stands_for_sw_column: drv_total_sales
+      source_table: drv_labor
+      source_column: drv_total_sales
+      how: own row
+  - name: drv_order_tips_amount
+    description: 'Calculation: SUM(p.payment_tip_amount) WHERE p.payment_status = ''CAPTURED'' AND p.server_id = employee_id AND p.paid_business_date = labor_business_date (same tenant_location_id)'
+    data_type: NUMERIC
+    meta:
+      stands_for_sw_column: drv_order_tips_amount
+      source_table: drv_labor
+      source_column: drv_order_tips_amount
+      how: own row

@@ -1,0 +1,20 @@
+{
+  "dependencies": {
+    "@neon/config": "^1.10.1",
+    "@neon/env": "^1.6.9",
+    "dotenv": "^18.0.9",
+    "exceljs": "^4.4.0",
+    "js-yaml": "^5.5.0",
+    "pg": "^8.23.1"
+  },
+  "scripts": {
+    "pull": "node src/pull.js",
+    "input": "node src/build_input.js",
+    "drv": "node src/build_drv.js",
+    "semantic": "node src/build_semantic.js",
+    "output": "node src/build_output.js",
+    "reports": "node src/build_reports.js",
+    "reconcile": "node src/reconcile.js",
+    "nightly": "node src/nightly.js"
+  }
+}
