@@ -10,8 +10,8 @@ on:
   schedule:
     - cron: "0 9 * * *"
     - cron: "0 10 * * *"
-    # TEMPORARY one-off test slot: fires once on 5 Nov at 14:07 UTC (19:37 IST) to prove GitHub's scheduler fires.
-    # The 4 AM gate below makes it skip itself (nothing runs). REMOVE this line after the test.
+    # TEMPORARY one-off slot: fires once on 5 Nov at 14:07 UTC (19:37 IST) and runs the REAL pipeline once, automatically,
+    # so the incremental load can be watched. REMOVE this line (and the matching gate exception) after the test.
     - cron: "7 14 5 11 *"
   workflow_dispatch:
     inputs:
@@ -52,7 +52,8 @@ jobs:
         run: |
           hour=$(TZ=America/Chicago date +%H)
           echo "Chicago hour now: $hour (event: ${{ github.event_name }})"
-          if [ "${{ github.event_name }}" = "schedule" ] && [ "$hour" != "04" ]; then
+          # the one-off test slot (cron "7 14 5 11 *") is allowed through so the real pipeline runs once automatically
+          if [ "${{ github.event_name }}" = "schedule" ] && [ "${{ github.event.schedule }}" != "7 14 5 11 *" ] && [ "$hour" != "04" ]; then
             echo "run=false" >> "$GITHUB_OUTPUT"; echo "Not 4 AM Central - skipping this schedule slot."
           else
             echo "run=true" >> "$GITHUB_OUTPUT"
