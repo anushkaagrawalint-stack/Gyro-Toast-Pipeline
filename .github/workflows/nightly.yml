@@ -10,6 +10,9 @@ on:
   schedule:
     - cron: "0 9 * * *"
     - cron: "0 10 * * *"
+    # TEMPORARY one-off test slot: fires once on 5 Nov at 14:07 UTC (19:37 IST) to prove GitHub's scheduler fires.
+    # The 4 AM gate below makes it skip itself (nothing runs). REMOVE this line after the test.
+    - cron: "7 14 5 11 *"
   workflow_dispatch:
     inputs:
       date:
