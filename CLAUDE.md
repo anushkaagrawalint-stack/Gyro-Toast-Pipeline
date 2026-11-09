@@ -11,7 +11,9 @@ Toast's own reports. Read this file first; it holds the rules the owner has give
 5. **Scope for now: orders, menus, config, labor** (the rest of the Toast API is out of scope until asked). **One business day at a time**; backfill comes later with the same code.
 6. **Tenant hierarchy** is ours, not Toast's: organisation *Gyro* -> 6 tenants -> 7 locations (below). Keep tenant/location on every row.
 7. When unsure about a definition, **say what you assumed** and keep the assumption visible (sheet notes, status columns, this file).
-8. Deploy schedule is **4:00 AM America/Chicago**, run by **GitHub Actions** (owner sets up the repo secrets and the repo).
+8. Nightly run via **GitHub Actions** after 3-4 AM America/Chicago (owner set up the repo secrets). GitHub starts scheduled runs hours late, so the run is gated on the database ("is yesterday loaded?"), not on the clock - see Scheduling.
+9. **Storage design = "Leaner"** (owner-approved, Nov 2026): order JSON in the API log kept **30 days** then pruned (orders stay in full in `raw.toast_orders`); `input` and `drv` keep only a rolling **45-day** window of orders/time entries; `raw`, `sem`, `output` keep full history. History starts **2025-12-29** (FY2026 P1).
+10. **Fiscal calendar** = the owner's 4-4-5 calendar in `schema/fiscal_calendar.csv` (weeks Monday-Sunday). FY2026 ends 2026-12-27 - ask the owner for FY2027 rows before then.
 
 ## Organisation / tenants / locations
 | Tenant | Location(s) |
@@ -38,7 +40,8 @@ One Toast client / management group serves all 7. The location GUIDs are in `.en
 | Reports | files | `src/build_reports.js` | Toast exports as the target | Sales Summary + Product Mix xlsx, built ONLY from `output` |
 
 **Not built yet:** `rpt_*` panel tables, `agg_waterfall_daily`, `panel_*` tables - they need the panel seed tables (`panel_measures`, `panel_members_fixed`, `panel_sections`), whose contents are not in the PDF. Ask the owner for them.
-The `drv` and `output` layers are dropped and rebuilt on every run; `input` is replaced per order/store; `raw` is append/upsert only (the audit trail).
+`raw` is append/upsert only (the audit trail). `input` is incremental: orders changed since the watermark (`input._build_state`, max `raw.toast_orders.fetched_at`) or missing are rebuilt, then anything older than 45 days is pruned. `drv` is rebuilt from `input` (so it covers the 45-day window). `sem` is updated in place: rows in the drv date window are deleted and re-inserted, older history is kept. `output` is rebuilt from `sem` (full history). `output.fiscal_calendar` + fiscal columns on `dim_date` come from the CSV.
+Non-order API pages identical to the last stored copy are saved with `payload` NULL and `same_as_id` pointing to the copy; `src/prune_raw.js` nulls order JSON older than 30 days (`payload_pruned_at`).
 
 ## Raw layer rules (do not weaken)
 - `raw.toast_orders`: one row per `order_guid`, upsert **only if the incoming `modified_date` is >= the stored one** (an old payload never overwrites a newer one).
@@ -56,14 +59,14 @@ node src/unique_values.js                                            # UniqueVal
 node src/modifier_categories.js && node src/modifier_item_map.js    # modifier grouping sheets
 node src/find_group.js "<modifier group name>"                       # where a modifier group sits
 ```
-`nightly.js`: pull (self-healing) -> input -> drv -> semantic -> output -> **reconcile** (fails loud, exit 1) -> reports. Sunday runs also re-pull a 30-day modified window (late voids/catering cancellations). A DB advisory lock prevents overlapping runs.
-A full run takes ~30 minutes today and will grow; if it gets slow, rebuild only recent days.
+`nightly.js`: pull (self-healing) -> input -> drv -> semantic -> output -> **reconcile** (fails loud, exit 1) -> prune API log -> reports. Sunday runs also re-pull a 30-day modified window (late voids/catering cancellations; ~70 min). A DB advisory lock (727001, direct connection) prevents overlapping runs.
+Backfill: `node src/nightly.js --from 20251229 [--date YYYYMMDD]` - per fiscal period: lean pulls (`pull.js --lean`: orders by business date, time entries, shifts, cash; no static config), build input for that period, drv, sem; then the normal window rebuild, output, reconcile every day. ~5-8 min of pulling per day.
 
 ## Config (`.env`, never committed; in CI these are GitHub repository secrets)
 `DATABASE_URL`, `TOAST_API_HOSTNAME`, `TOAST_USER_ACCESS_TYPE`, `TOAST_CLIENT_ID`, `TOAST_CLIENT_SECRET`, `TOAST_GUID_FONDREN|KATY|MISSOURI_CITY|PEARLAND|RICHMOND|SPRING_KLEIN|SUGAR_LAND`. Optional: `REPORT_DIR` (where reports are written).
 
 ## Scheduling (GitHub Actions)
-`.github/workflows/nightly.yml` - 4:00 AM America/Chicago year-round. GitHub cron is UTC, so two crons (09:00 and 10:00 UTC) are listed and a first step lets only the one that is 4 AM Central continue. Scheduled workflows run from the default branch. Manual run: Actions -> "Run workflow" (optional date, optional deep re-pull). Reports are uploaded as an artifact.
+`.github/workflows/nightly.yml` - three crons, 09:17, 11:17, 13:17 UTC (09:17 = 3:17 AM CST / 4:17 AM CDT; the others are fallbacks because GitHub often starts scheduled runs hours late or drops them). The first step, `src/should_run.js`, checks `raw.pipeline_runs`: if yesterday (Chicago) already succeeded, the run skips itself; otherwise it runs, however late. Scheduled workflows run from the default branch. Manual run: Actions -> "Run workflow" (optional date, optional deep re-pull). Reports are uploaded as an artifact.
 
 ## Validation anchors (business date 2026-11-03; must keep matching Toast)
 - 484 non-voided orders (487 landed, 3 voided); guests 484; 481 live payments for the day.

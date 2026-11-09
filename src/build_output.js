@@ -4,6 +4,8 @@
 //   node src/build_output.js
 require("dotenv").config({ quiet: true });
 const { Pool } = require("pg");
+const FISCAL_ROWS = require("fs").readFileSync(require("path").join(__dirname, "../schema/fiscal_calendar.csv"), "utf8").trim().split("\n").slice(1).map((l) => l.split(","));
+const FISCAL_VALUES = FISCAL_ROWS.map((r) => `(${+r[0]},${+r[1]},'${r[2]}'::date,'${r[3]}'::date,${+r[4]},${+r[5]},${+r[6]})`).join(",");
 
 const K = (t, c) => `output.k(${t}, ${c})`;
 const D = (x) => `to_date(${x}::text,'YYYYMMDD')`;
@@ -35,11 +37,20 @@ const STEPS = [
       FROM sem.sem_order_items WHERE row_type='tax' AND tax_name IS NOT NULL`],
 
   // ---------------------------------------------------------------- dimensions
+  // fiscal calendar (4-4-5, Monday-start weeks) from schema/fiscal_calendar.csv
+  ["fiscal_calendar", `CREATE TABLE output.fiscal_calendar AS SELECT * FROM (VALUES ${FISCAL_VALUES}) v(fiscal_year, period, start_date, end_date, quarter, days, weeks)`],
   ["dim_date", `CREATE TABLE output.dim_date AS SELECT d::date AS business_date, to_char(d,'YYYYMMDD')::bigint AS date_int,
       upper(to_char(d,'DY')) AS day_of_week_code, trim(to_char(d,'Day')) AS day_of_week_name, extract(isodow FROM d)::bigint AS day_of_week_number,
       date_trunc('week', d)::date AS week_start_date, date_trunc('month', d)::date AS month_start_date, extract(quarter FROM d)::bigint AS quarter,
-      extract(year FROM d)::bigint AS year, (d - interval '364 days')::date AS same_weekday_last_year
-      FROM generate_series('2022-01-01'::date, '2028-12-31'::date, interval '1 day') d`],
+      extract(year FROM d)::bigint AS year, (d - interval '364 days')::date AS same_weekday_last_year,
+      f.fiscal_year::bigint AS fiscal_year, f.period::bigint AS fiscal_period, f.quarter::bigint AS fiscal_quarter,
+      CASE WHEN f.period IS NOT NULL THEN ((d::date - f.start_date) / 7 + 1)::bigint END AS fiscal_week,
+      CASE WHEN f.period IS NOT NULL THEN ((d::date - (SELECT min(start_date) FROM output.fiscal_calendar x WHERE x.fiscal_year = f.fiscal_year)) / 7 + 1)::bigint END AS fiscal_week_of_year,
+      CASE WHEN f.period IS NOT NULL THEN 'P' || f.period END AS fiscal_period_label,
+      CASE WHEN f.period IS NOT NULL THEN 'P' || f.period || 'W' || ((d::date - f.start_date) / 7 + 1) END AS fiscal_week_label,
+      f.start_date AS fiscal_period_start, f.end_date AS fiscal_period_end
+      FROM generate_series('2022-01-01'::date, '2028-12-31'::date, interval '1 day') d
+      LEFT JOIN output.fiscal_calendar f ON d::date BETWEEN f.start_date AND f.end_date`],
   ["dim_hour", `CREATE TABLE output.dim_hour AS SELECT h::bigint AS order_hour, 'H'||lpad(h::text,2,'0') AS hour_code,
       CASE WHEN h=0 THEN '12 AM' WHEN h<12 THEN h||' AM' WHEN h=12 THEN '12 PM' ELSE (h-12)||' PM' END AS hour_label FROM generate_series(0,23) h`],
   ["dim_location", `CREATE TABLE output.dim_location AS SELECT ${K("a.tenant_id", "a.store_location_id")} AS location_key, a.tenant_id, a.store_location_id, a.store_name,
@@ -129,18 +140,33 @@ const STEPS = [
     FROM (SELECT * FROM sale UNION ALL SELECT * FROM ref) u GROUP BY 1,2,3,4,5,6,7,8`],
 
   ["agg_item_daily", `CREATE TABLE output.agg_item_daily AS
-    SELECT i.tenant_id, i.store_location_id, ${D("i.order_business_date")} AS business_date, o.drv_hour_order_opened_at::bigint AS order_hour,
+    WITH sale AS (
+      SELECT i.tenant_id, i.store_location_id, ${D("i.order_business_date")} AS business_date, o.drv_hour_order_opened_at::bigint AS order_hour,
       ${K("i.tenant_id", MI("i"))} AS menu_item_key, ${K("i.tenant_id", SC("i"))} AS sales_category_key,
       ${K("i.tenant_id", "i.revenue_center_name")} AS revenue_center_key, ${K("i.tenant_id", "i.dining_option_name")} AS channel_key,
       ${K("i.tenant_id", "i.service_window_name")} AS daypart_key, i.drv_sales_status AS sales_status,
-      sum(i.drv_countable_quantity) AS qty_sold, sum(i.drv_gross_sales) AS gross_amount, sum(i.drv_discount_incl_check_share) AS discount_amount, 0::numeric AS refund_amount,
-      sum(i.drv_gross_sales - i.drv_discount_incl_check_share) AS net_amount, sum(i.drv_countable_tax_amount) AS tax_amount,
-      coalesce(sum(i.item_price_before_discount) FILTER (WHERE i.drv_sales_status='VOIDED'),0) AS voided_gross_amount,
-      coalesce(sum(i.item_quantity) FILTER (WHERE i.drv_sales_status='VOIDED'),0) AS voided_qty, sum(i.drv_deferred_amount) AS deferred_amount,
-      coalesce(sum(i.item_quantity) FILTER (WHERE i.drv_sales_status='WASTE'),0) AS waste_qty,
-      coalesce(sum(i.item_price_before_discount) FILTER (WHERE i.drv_sales_status='WASTE'),0) AS waste_amount, ${RUN} AS run_id, ${ASOF} AS as_of_ts
-    FROM sem.sem_order_items i JOIN output._ord o ON o.store_location_id=i.store_location_id AND o.order_id=i.order_id
-    WHERE i.row_type='item' GROUP BY 1,2,3,4,5,6,7,8,9,10`],
+        sum(i.drv_countable_quantity) AS qty_sold, sum(i.drv_gross_sales) AS gross_amount, sum(i.drv_discount_incl_check_share) AS discount_amount, 0::numeric AS refund_amount,
+        sum(i.drv_gross_sales - i.drv_discount_incl_check_share) AS net_amount, sum(i.drv_countable_tax_amount) AS tax_amount,
+        coalesce(sum(i.item_price_before_discount) FILTER (WHERE i.drv_sales_status='VOIDED'),0) AS voided_gross_amount,
+        coalesce(sum(i.item_quantity) FILTER (WHERE i.drv_sales_status='VOIDED'),0) AS voided_qty, sum(i.drv_deferred_amount) AS deferred_amount,
+        coalesce(sum(i.item_quantity) FILTER (WHERE i.drv_sales_status='WASTE'),0) AS waste_qty,
+        coalesce(sum(i.item_price_before_discount) FILTER (WHERE i.drv_sales_status='WASTE'),0) AS waste_amount
+      FROM sem.sem_order_items i JOIN output._ord o ON o.store_location_id=i.store_location_id AND o.order_id=i.order_id
+      WHERE i.row_type='item' GROUP BY 1,2,3,4,5,6,7,8,9,10),
+    ref AS ( -- refunds sit on the day they were refunded, not on the sale day
+      SELECT i.tenant_id, i.store_location_id, ${D("i.drv_refund_date")} AS business_date, o.drv_hour_order_opened_at::bigint AS order_hour,
+      ${K("i.tenant_id", MI("i"))} AS menu_item_key, ${K("i.tenant_id", SC("i"))} AS sales_category_key,
+      ${K("i.tenant_id", "i.revenue_center_name")} AS revenue_center_key, ${K("i.tenant_id", "i.dining_option_name")} AS channel_key,
+      ${K("i.tenant_id", "i.service_window_name")} AS daypart_key, i.drv_sales_status AS sales_status,
+        0::numeric, 0::numeric, 0::numeric, sum(coalesce(i.items_refund_amount,0)) AS refund_amount, -sum(coalesce(i.items_refund_amount,0)) AS net_amount, 0::numeric,
+        0::numeric, 0::numeric, 0::numeric, 0::numeric, 0::numeric
+      FROM sem.sem_order_items i JOIN output._ord o ON o.store_location_id=i.store_location_id AND o.order_id=i.order_id
+      WHERE i.row_type='item' AND i.drv_refund_date IS NOT NULL AND coalesce(i.items_refund_amount,0) > 0 GROUP BY 1,2,3,4,5,6,7,8,9,10)
+    SELECT tenant_id, store_location_id, business_date, order_hour, menu_item_key, sales_category_key, revenue_center_key, channel_key, daypart_key, sales_status,
+      sum(qty_sold) AS qty_sold, sum(gross_amount) AS gross_amount, sum(discount_amount) AS discount_amount, sum(refund_amount) AS refund_amount, sum(net_amount) AS net_amount,
+      sum(tax_amount) AS tax_amount, sum(voided_gross_amount) AS voided_gross_amount, sum(voided_qty) AS voided_qty, sum(deferred_amount) AS deferred_amount,
+      sum(waste_qty) AS waste_qty, sum(waste_amount) AS waste_amount, ${RUN} AS run_id, ${ASOF} AS as_of_ts
+    FROM (SELECT * FROM sale UNION ALL SELECT * FROM ref) u GROUP BY 1,2,3,4,5,6,7,8,9,10`],
 
   ["agg_modifier_daily", `CREATE TABLE output.agg_modifier_daily AS
     SELECT i.tenant_id, i.store_location_id, ${D("i.order_business_date")} AS business_date, ${K("i.tenant_id", MD("i"))} AS modifier_key, i.drv_sales_status AS sales_status,
@@ -180,11 +206,16 @@ const STEPS = [
     FROM u GROUP BY 1,2,3,4,5,6,7`],
 
   ["agg_charge_daily", `CREATE TABLE output.agg_charge_daily AS
-    SELECT tenant_id, store_location_id, ${D("order_business_date")} AS business_date,
-      ${K("tenant_id", "coalesce(config_service_charge_service_charge_name,'')||'|'||coalesce(service_charge_type,'')||'|'||coalesce(is_gratuity_charge,false)::text||'|'||coalesce(is_taxable_charge,false)::text")} AS service_charge_key,
-      count(*)::bigint AS charge_count, sum(drv_live_charge_amount) AS charge_gross, coalesce(sum(service_charge_refund_amount),0) AS charge_refund_amount,
-      sum(drv_live_charge_amount) - coalesce(sum(service_charge_refund_amount),0) AS charge_amount, sum(drv_charge_tax_amount) AS charge_tax_amount, ${RUN} AS run_id, ${ASOF} AS as_of_ts
-    FROM sem.sem_order_header WHERE source_array_index IS NOT NULL GROUP BY 1,2,3,4`],
+    WITH h AS (SELECT * FROM sem.sem_order_header WHERE source_array_index IS NOT NULL),
+    sale AS (SELECT tenant_id, store_location_id, ${D("order_business_date")} AS business_date, ${K("tenant_id", "coalesce(config_service_charge_service_charge_name,'')||'|'||coalesce(service_charge_type,'')||'|'||coalesce(is_gratuity_charge,false)::text||'|'||coalesce(is_taxable_charge,false)::text")} AS service_charge_key,
+        count(*)::bigint AS charge_count, sum(drv_live_charge_amount) AS charge_gross, 0::numeric AS charge_refund_amount, sum(drv_live_charge_amount) AS charge_amount, sum(drv_charge_tax_amount) AS charge_tax_amount
+      FROM h GROUP BY 1,2,3,4),
+    ref AS (SELECT tenant_id, store_location_id, ${D("drv_charge_refund_date")} AS business_date, ${K("tenant_id", "coalesce(config_service_charge_service_charge_name,'')||'|'||coalesce(service_charge_type,'')||'|'||coalesce(is_gratuity_charge,false)::text||'|'||coalesce(is_taxable_charge,false)::text")} AS service_charge_key,
+        0::bigint, 0::numeric, sum(coalesce(service_charge_refund_amount,0)), -sum(coalesce(service_charge_refund_amount,0)), 0::numeric
+      FROM h WHERE drv_charge_refund_date IS NOT NULL AND coalesce(service_charge_refund_amount,0) > 0 GROUP BY 1,2,3,4)
+    SELECT tenant_id, store_location_id, business_date, service_charge_key, sum(charge_count)::bigint AS charge_count, sum(charge_gross) AS charge_gross, sum(charge_refund_amount) AS charge_refund_amount,
+      sum(charge_amount) AS charge_amount, sum(charge_tax_amount) AS charge_tax_amount, ${RUN} AS run_id, ${ASOF} AS as_of_ts
+    FROM (SELECT * FROM sale UNION ALL SELECT * FROM ref) u GROUP BY 1,2,3,4`],
 
   ["agg_discount_daily", `CREATE TABLE output.agg_discount_daily AS
     SELECT tenant_id, store_location_id, ${D("order_business_date")} AS business_date,
@@ -193,11 +224,17 @@ const STEPS = [
     FROM sem.sem_order_items WHERE row_type='discount' AND drv_is_live_discount=1 GROUP BY 1,2,3,4`],
 
   ["agg_tax_daily", `CREATE TABLE output.agg_tax_daily AS
-    SELECT tenant_id, store_location_id, ${D("order_business_date")} AS business_date, ${K("tenant_id", "coalesce(tax_name,'')||'|'||coalesce(tax_rate::text,'')")} AS tax_key,
-      sum(drv_tax_jurisdiction_amount) AS tax_amount, coalesce(sum(drv_tax_refund_amount),0) AS tax_refund_amount,
-      sum(drv_tax_jurisdiction_amount) - coalesce(sum(drv_tax_refund_amount),0) AS net_tax_amount, sum(drv_taxable_amount) AS taxable_amount,
-      coalesce(sum(drv_taxable_amount) FILTER (WHERE is_tax_marketplace_remitted IS TRUE),0) AS facilitator_base, ${RUN} AS run_id, ${ASOF} AS as_of_ts
-    FROM sem.sem_order_items WHERE row_type='tax' GROUP BY 1,2,3,4`],
+    WITH t AS (SELECT * FROM sem.sem_order_items WHERE row_type='tax'),
+    sale AS (SELECT tenant_id, store_location_id, ${D("order_business_date")} AS business_date, ${K("tenant_id", "coalesce(tax_name,'')||'|'||coalesce(tax_rate::text,'')")} AS tax_key,
+        sum(drv_tax_jurisdiction_amount) AS tax_amount, 0::numeric AS tax_refund_amount, sum(drv_tax_jurisdiction_amount) AS net_tax_amount, sum(drv_taxable_amount) AS taxable_amount,
+        coalesce(sum(drv_taxable_amount) FILTER (WHERE is_tax_marketplace_remitted IS TRUE),0) AS facilitator_base
+      FROM t GROUP BY 1,2,3,4),
+    ref AS (SELECT tenant_id, store_location_id, ${D("drv_tax_refund_date")} AS business_date, ${K("tenant_id", "coalesce(tax_name,'')||'|'||coalesce(tax_rate::text,'')")} AS tax_key,
+        0::numeric, sum(coalesce(drv_tax_refund_amount,0)), -sum(coalesce(drv_tax_refund_amount,0)), 0::numeric, 0::numeric
+      FROM t WHERE drv_tax_refund_date IS NOT NULL AND coalesce(drv_tax_refund_amount,0) > 0 GROUP BY 1,2,3,4)
+    SELECT tenant_id, store_location_id, business_date, tax_key, sum(tax_amount) AS tax_amount, sum(tax_refund_amount) AS tax_refund_amount, sum(net_tax_amount) AS net_tax_amount,
+      sum(taxable_amount) AS taxable_amount, sum(facilitator_base) AS facilitator_base, ${RUN} AS run_id, ${ASOF} AS as_of_ts
+    FROM (SELECT * FROM sale UNION ALL SELECT * FROM ref) u GROUP BY 1,2,3,4`],
 
   ["agg_exception_daily", `CREATE TABLE output.agg_exception_daily AS
     SELECT tenant_id, store_location_id, business_date, exception_key, sum(amount) AS amount, count(DISTINCT order_id)::bigint AS order_count, sum(item_qty) AS item_qty, ${RUN} AS run_id, ${ASOF} AS as_of_ts FROM (

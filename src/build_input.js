@@ -125,15 +125,35 @@ function rowsFromRoot(spec, root, loc) {
 }
 
 // ---- main ------------------------------------------------------------------------------
+// Incremental, windowed build (leaner storage):
+//   default:            work window = the last WINDOW_DAYS business days (+ any later, pre-ordered dates). Only orders that
+//                       changed since the last build (fetched_at > watermark) or are missing from input are (re)built.
+//                       Orders older than the window are removed from input (history lives in raw/sem/output).
+//   --from YYYYMMDD --to YYYYMMDD   explicit range (backfill chunk): every order in the range is built and input holds
+//                       exactly that range afterwards. The watermark is not touched.
+//   --full              ignore the watermark (rebuild every order in the window)
+const WINDOW_DAYS = 45;
+const BATCH = 2500; // orders per batch (bounds memory)
+const argv = (n) => { const i = process.argv.indexOf("--" + n); return i > -1 ? process.argv[i + 1] : null; };
+const ymd = (d) => Number(d.toISOString().slice(0, 10).replace(/-/g, ""));
+const chicagoToday = () => Number(new Intl.DateTimeFormat("en-CA", { timeZone: "America/Chicago" }).format(new Date()).replace(/-/g, ""));
+const addDaysInt = (n, k) => { const s = String(n), d = new Date(Date.UTC(+s.slice(0, 4), +s.slice(4, 6) - 1, +s.slice(6, 8)) + k * 864e5); return ymd(d); };
+
 async function main() {
-  const ai = process.argv.indexOf("--run");
   const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 4 });
-  const runId = ai > -1 ? process.argv[ai + 1]
-    : (await pool.query("select run_id from raw.pull_runs where status='success' order by started_at desc limit 1")).rows[0].run_id;
-  console.log("input build from SOR run", runId);
+  const FROM = argv("from") ? Number(argv("from")) : null, TO = argv("to") ? Number(argv("to")) : null;
+  const explicit = FROM !== null && TO !== null;
+  const lo = explicit ? FROM : addDaysInt(chicagoToday(), -WINDOW_DAYS);
+  const hi = explicit ? TO : 99991231;
+  // config / menus come from the latest successful FULL pull (lean backfill pulls carry no config)
+  const cfgRun = (await pool.query(`SELECT a.run_id FROM raw.api_responses a JOIN raw.pull_runs r ON r.run_id=a.run_id
+      WHERE r.status IN ('success','partial') AND a.endpoint='/menus/v2/menus' AND a.http_status=200 ORDER BY r.started_at DESC LIMIT 1`)).rows[0];
+  if (!cfgRun) throw new Error("no full pull with menus/config found");
+  console.log(`input build: window ${lo}..${explicit ? hi : "(open)"}${explicit ? " [explicit range]" : ""}; config from run ${cfgRun.run_id}`);
 
   // DDL
   await pool.query('CREATE SCHEMA IF NOT EXISTS "input"');
+  await pool.query(`CREATE TABLE IF NOT EXISTS "input"._build_state (key text PRIMARY KEY, value text, updated_at timestamptz DEFAULT now())`);
   const colsOf = {};
   for (const t of TABLES) {
     const names = SPEC[t].columns.map((c) => colName(c.to));
@@ -142,87 +162,104 @@ async function main() {
     colsOf[t] = SPEC[t].columns.map((c) => ({ name: colName(c.to), type: c.type }));
     await pool.query(`CREATE TABLE IF NOT EXISTS "input"."${t}" (${colsOf[t].map((c) => `"${c.name}" ${DDL[c.type]}`).join(", ")})`);
     await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS "${t}_key" ON "input"."${t}" (${SPEC[t].key.map((k) => `"${k}"`).join(",")}) NULLS NOT DISTINCT`);
+    if (ORDER_TABLES.includes(t)) await pool.query(`CREATE INDEX IF NOT EXISTS "${t}_order" ON "input"."${t}" (order_id)`);
+  }
+  const counts = {}, dups = {};
+  TABLES.forEach((t) => (counts[t] = 0));
+
+  // writes rows for a set of tables: delete the scope, then insert (deduped by key)
+  async function write(client, tables, rowsBy, scope) {
+    for (const t of tables) {
+      const spec = SPEC[t], sc = scopeOf(t, spec);
+      if (sc === "order") await client.query(`DELETE FROM "input"."${t}" WHERE order_id = ANY($1)`, [scope.order]);
+      else if (sc === "time_entry") await client.query(`DELETE FROM "input"."${t}" WHERE time_entry_id = ANY($1)`, [scope.time_entry]);
+      else if (scope.store[t] && scope.store[t].length) await client.query(`DELETE FROM "input"."${t}" WHERE store_location_id = ANY($1)`, [scope.store[t]]);
+      const seen = new Map();
+      for (const r of rowsBy[t] || []) { const k = JSON.stringify(spec.key.map((c) => r[c])); if (seen.has(k)) dups[t] = (dups[t] || 0) + 1; seen.set(k, r); }
+      const rows = [...seen.values()], cols = colsOf[t], per = Math.max(1, Math.floor(30000 / cols.length));
+      for (let i = 0; i < rows.length; i += per) {
+        const params = [], vals = rows.slice(i, i + per).map((r) => "(" + cols.map((c) => { params.push(r[c.name]); return "$" + params.length; }).join(",") + ")");
+        try { await client.query(`INSERT INTO "input"."${t}" (${cols.map((c) => `"${c.name}"`).join(",")}) VALUES ${vals.join(",")}`, params); }
+        catch (e) { throw new Error(`${t}: ${e.message}`); }
+      }
+      counts[t] += rows.length;
+    }
   }
 
+  // ---- orders, in batches
+  const wm = explicit || process.argv.includes("--full") ? null
+    : (await pool.query(`SELECT value FROM "input"._build_state WHERE key='orders_watermark'`)).rows[0]?.value || null;
+  const newWm = (await pool.query(`SELECT max(fetched_at)::text m FROM raw.toast_orders`)).rows[0].m;
+  const ids = (await pool.query(`
+      SELECT t.order_guid FROM raw.toast_orders t
+       WHERE t.business_date BETWEEN $1 AND $2
+         AND ($3::timestamptz IS NULL OR t.fetched_at > $3::timestamptz
+              OR NOT EXISTS (SELECT 1 FROM "input".in_order i WHERE i.order_id = t.order_guid::text))
+       ORDER BY t.business_date, t.order_guid`, [lo, hi, wm])).rows.map((r) => r.order_guid);
+  console.log(`orders to (re)build: ${ids.length}${wm ? " (changed since " + wm + " or missing)" : ""}`);
+  for (let b = 0; b < ids.length; b += BATCH) {
+    const batch = ids.slice(b, b + BATCH);
+    const orders = (await pool.query(`SELECT order_guid, location_name, payload FROM raw.toast_orders WHERE order_guid = ANY($1::uuid[])`, [batch])).rows;
+    const rowsBy = {};
+    for (const o of orders) for (const t of ORDER_TABLES) (rowsBy[t] ||= []).push(...rowsFromRoot(SPEC[t], o.payload, o.location_name));
+    const client = await pool.connect();
+    try { await client.query("BEGIN"); await write(client, ORDER_TABLES, rowsBy, { order: orders.map((o) => o.order_guid), time_entry: [], store: {} }); await client.query("COMMIT"); }
+    catch (e) { await client.query("ROLLBACK"); throw e; } finally { client.release(); }
+  }
+
+  // ---- config / menus / labor (per location). Snapshots stored once are resolved through same_as_id.
   const locs = (await pool.query("select location_guid, location_name from raw.tenant_locations order by 2")).rows;
-  const rowsBy = {}; TABLES.forEach((t) => (rowsBy[t] = []));
-  const dups = {};
-  const scopeIds = { order: new Set(), time_entry: new Set(), store: new Set() };
-  const scopeOK = {}; // table -> Set(location) where source data exists
-  const sample = (r) => r;
-
-  // ---- orders
-  const orders = (await pool.query("select order_guid, location_name, payload from raw.toast_orders")).rows;
-  for (const o of orders) {
-    scopeIds.order.add(o.order_guid);
-    for (const t of ORDER_TABLES) rowsBy[t].push(...rowsFromRoot(SPEC[t], o.payload, o.location_name));
-  }
-
-  // ---- api payload based entities (config / menus / labor)
+  const rowsBy = {}, scope = { order: [], time_entry: [], store: {} };
   for (const l of locs) {
     const resp = (await pool.query(
-      "select endpoint, page_no, http_status, payload from raw.api_responses where run_id=$1 and location_guid=$2 order by endpoint, page_no, id",
-      [runId, l.location_guid])).rows;
+      `SELECT a.endpoint, a.page_no, a.http_status, coalesce(a.payload, s.payload) payload
+         FROM raw.api_responses a LEFT JOIN raw.api_responses s ON s.id = a.same_as_id
+        WHERE a.location_guid=$2 AND (
+              (a.run_id=$1 AND a.endpoint NOT LIKE '/orders/%' AND a.endpoint <> '/labor/v1/timeEntries')
+           OR (a.endpoint='/labor/v1/timeEntries' AND a.http_status=200 AND (a.request_params->>'businessDate')::int BETWEEN $3 AND $4
+               AND a.run_id IN (SELECT run_id FROM raw.pull_runs WHERE status IN ('success','partial'))))
+        ORDER BY a.endpoint, a.run_id, a.page_no, a.id`,
+      [cfgRun.run_id, l.location_guid, lo, Math.min(hi, 99991231)])).rows;
     const byEp = {};
     for (const r of resp) (byEp[r.endpoint] ||= []).push(r);
     for (const t of TABLES) {
       if (ORDER_TABLES.includes(t)) continue;
       const ep = ENTITY_EP[entityOf(SPEC[t])];
       if (!ep) continue;
-      const pages = (byEp[ep] || []).filter((p) => p.http_status >= 200 && p.http_status < 300);
+      const pages = (byEp[ep] || []).filter((p) => p.http_status >= 200 && p.http_status < 300 && p.payload !== null);
       if (!pages.length) continue;
-      (scopeOK[t] ||= new Set()).add(l.location_name);
+      if (scopeOf(t, SPEC[t]) === "store") (scope.store[t] ||= []).push(l.location_name);
       for (const p of pages) {
-        const roots = Array.isArray(p.payload) ? p.payload : [p.payload];
-        for (const root of roots) {
+        for (const root of Array.isArray(p.payload) ? p.payload : [p.payload]) {
           if (root === null || (typeof root === "object" && !Array.isArray(root) && Object.keys(root).length === 0)) continue;
-          rowsBy[t].push(...rowsFromRoot(SPEC[t], root, l.location_name));
-          if (scopeOf(t, SPEC[t]) === "time_entry" && root && root.guid) scopeIds.time_entry.add(root.guid);
+          (rowsBy[t] ||= []).push(...rowsFromRoot(SPEC[t], root, l.location_name));
+          if (scopeOf(t, SPEC[t]) === "time_entry" && root && root.guid) scope.time_entry.push(root.guid);
         }
       }
     }
   }
-
-  // ---- write
+  const other = TABLES.filter((t) => !ORDER_TABLES.includes(t));
   const client = await pool.connect();
-  const counts = {};
   try {
     await client.query("BEGIN");
-    for (const t of TABLES) {
-      const spec = SPEC[t], sc = scopeOf(t, spec);
-      if (sc === "order") await client.query(`DELETE FROM "input"."${t}" WHERE order_id = ANY($1)`, [[...scopeIds.order]]);
-      else if (sc === "time_entry") {
-        const idcol = t === "in_labor_time_entry" ? "time_entry_id" : "time_entry_id";
-        await client.query(`DELETE FROM "input"."${t}" WHERE "${idcol}" = ANY($1)`, [[...scopeIds.time_entry]]);
-      } else if (scopeOK[t] && scopeOK[t].size)
-        await client.query(`DELETE FROM "input"."${t}" WHERE store_location_id = ANY($1)`, [[...scopeOK[t]]]);
-      // dedupe by key (last wins)
-      const seen = new Map();
-      for (const r of rowsBy[t]) {
-        const k = JSON.stringify(spec.key.map((c) => r[c]));
-        if (seen.has(k)) dups[t] = (dups[t] || 0) + 1;
-        seen.set(k, r);
-      }
-      const rows = [...seen.values()];
-      const cols = colsOf[t];
-      const per = Math.max(1, Math.floor(30000 / cols.length));
-      for (let i = 0; i < rows.length; i += per) {
-        const chunk = rows.slice(i, i + per);
-        const params = [];
-        const vals = chunk.map((r) => "(" + cols.map((c) => { params.push(r[c.name]); return "$" + params.length; }).join(",") + ")");
-        try {
-          await client.query(`INSERT INTO "input"."${t}" (${cols.map((c) => `"${c.name}"`).join(",")}) VALUES ${vals.join(",")}`, params);
-        } catch (e) { throw new Error(`${t}: ${e.message}`); }
-      }
-      counts[t] = rows.length;
-    }
+    await write(client, other, rowsBy, scope);
+    // ---- prune: input keeps only the window (history lives in raw / sem / output)
+    const outside = `SELECT order_id FROM "input".in_order WHERE order_business_date < ${lo}${explicit ? ` OR order_business_date > ${hi}` : ""}`;
+    let pruned = 0;
+    for (const t of ORDER_TABLES.filter((x) => x !== "in_order")) await client.query(`DELETE FROM "input"."${t}" WHERE order_id IN (${outside})`);
+    pruned = (await client.query(`DELETE FROM "input".in_order WHERE order_id IN (${outside})`)).rowCount;
+    const teOut = `SELECT time_entry_id FROM "input".in_labor_time_entry WHERE nullif(labor_business_date::text,'')::int < ${lo}${explicit ? ` OR nullif(labor_business_date::text,'')::int > ${hi}` : ""}`;
+    await client.query(`DELETE FROM "input".in_labor_time_entry_break WHERE time_entry_id IN (${teOut})`);
+    await client.query(`DELETE FROM "input".in_labor_time_entry WHERE time_entry_id IN (${teOut})`);
+    if (!explicit) await client.query(`INSERT INTO "input"._build_state(key,value,updated_at) VALUES ('orders_watermark',$1,now())
+        ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=now()`, [newWm]);
     await client.query("COMMIT");
-  } catch (e) { await client.query("ROLLBACK"); throw e; }
-  finally { client.release(); }
+    console.log(`pruned ${pruned} orders outside the window`);
+  } catch (e) { await client.query("ROLLBACK"); throw e; } finally { client.release(); }
 
-  console.log(`tables=${TABLES.length}`);
-  console.table(Object.entries(counts).filter(([, n]) => n > 0).map(([t, n]) => ({ table: t, rows: n, dup_keys_collapsed: dups[t] || 0 })));
-  console.log("empty tables:", Object.entries(counts).filter(([, n]) => n === 0).map(([t]) => t).join(", "));
+  const inOrders = (await pool.query(`SELECT count(*) n, min(order_business_date) mn, max(order_business_date) mx FROM "input".in_order`)).rows[0];
+  console.log(`tables=${TABLES.length}; input now holds ${inOrders.n} orders (${inOrders.mn}..${inOrders.mx})`);
+  console.table(Object.entries(counts).filter(([, n]) => n > 0).map(([t, n]) => ({ table: t, rows_written: n, dup_keys_collapsed: dups[t] || 0 })));
   await pool.end();
 }
 main().catch((e) => { console.error("FAIL:", e.message); process.exit(1); });

@@ -7,6 +7,7 @@ const crypto = require("crypto");
 const HOST = process.env.TOAST_API_HOSTNAME;
 const MIN_INTERVAL_MS = 200; // 5 req/s per location
 const PAGE_SIZE = 100;
+const LEAN = process.argv.includes("--lean"); // backfill mode: only date-scoped endpoints (orders, time entries, shifts, cash)
 
 // Tenant -> locations (logical grouping; Toast has no tenant concept)
 const TENANTS = [
@@ -40,7 +41,8 @@ const ENDPOINTS = [
   { path: "/menus/v2/metadata" },
   { path: "/labor/v1/employees" },
   { path: "/labor/v1/jobs" },
-  { path: "/labor/v1/shifts", params: (c) => ({ startDate: c.startIso, endDate: c.endIso }) },
+  // Toast rejects shift windows longer than 30 days (the deep re-pull pads 30 days back), so clamp the start
+  { path: "/labor/v1/shifts", params: (c) => ({ startDate: new Date(Math.max(Date.parse(c.startIso.replace("+0000", "Z")), Date.parse(c.endIso.replace("+0000", "Z")) - 29 * 864e5)).toISOString().replace("Z", "+0000"), endDate: c.endIso }) },
   { path: "/labor/v1/timeEntries", params: (c) => ({ businessDate: c.bd }) },
   { path: "/cashmgmt/v1/entries", params: (c) => ({ businessDate: c.bd }) },
   { path: "/cashmgmt/v1/deposits", params: (c) => ({ businessDate: c.bd }) },
@@ -121,6 +123,8 @@ async function main() {
   const endIso = new Date(Date.parse(day + "T00:00:00Z") + 2 * 864e5).toISOString().replace("Z", "+0000");
 
   const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: LOCATIONS.length + 2 });
+  // an idle connection dropped by the network must not crash the process (the pool reconnects on the next query)
+  pool.on("error", (e) => console.error("db connection dropped (pool will reconnect):", e.message));
   await pool.query(fs.readFileSync(path.join(__dirname, "../sql/001_raw.sql"), "utf8"));
   for (const l of LOCATIONS)
     await pool.query(
@@ -143,11 +147,24 @@ async function main() {
   async function save(loc, ep, params, pageNo, pageToken, r) {
     const ok = r.status >= 200 && r.status < 300;
     stats.total++; ok ? stats.ok++ : stats.failed++;
+    const isOrders = ep.startsWith("/orders/");
+    const body = JSON.stringify(r.body);
+    const md5 = crypto.createHash("md5").update(body).digest("hex");
+    let payload = body, sameAs = null;
+    if (ok && isOrders && LEAN) payload = null; // backfill: the order JSON is kept once, in raw.toast_orders
+    else if (ok && !isOrders) {
+      // config / menus / labor: store the JSON only when it changed since the last stored copy
+      const prev = (await pool.query(
+        `SELECT id FROM raw.api_responses WHERE location_guid IS NOT DISTINCT FROM $1 AND endpoint=$2 AND page_no IS NOT DISTINCT FROM $3
+           AND request_params=$4::jsonb AND payload_md5=$5 AND payload IS NOT NULL ORDER BY id DESC LIMIT 1`,
+        [loc.guid, ep, pageNo, JSON.stringify(params || {}), md5])).rows[0];
+      if (prev) { payload = null; sameAs = prev.id; }
+    }
     await pool.query(
-      `INSERT INTO raw.api_responses(run_id,tenant,location_name,location_guid,endpoint,request_params,page_no,page_token,next_page_token,http_status,duration_ms,record_count,error,payload)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::jsonb)`,
+      `INSERT INTO raw.api_responses(run_id,tenant,location_name,location_guid,endpoint,request_params,page_no,page_token,next_page_token,http_status,duration_ms,record_count,error,payload,payload_md5,same_as_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::jsonb,$15,$16)`,
       [runId, loc.tenant, loc.name, loc.guid, ep, JSON.stringify(params || {}), pageNo, pageToken || null,
-       r.next || null, r.status, r.ms, rows(r.body), r.error || (ok ? null : "HTTP " + r.status), JSON.stringify(r.body)]
+       r.next || null, r.status, r.ms, rows(r.body), r.error || (ok ? null : "HTTP " + r.status), payload, md5, sameAs]
     );
     return ok;
   }
@@ -196,6 +213,7 @@ async function main() {
     }
     // Padded modified-date window: orders touched in the window but with another business date
     // (e.g. paid today for a future order). Attributed later by payload.businessDate.
+    if (!LEAN) {
     for (let page = 1; ; page++) {
       const params = { startDate: startIso, endDate: endIso, page, pageSize: PAGE_SIZE };
       const r = await get("/orders/v2/ordersBulk", params);
@@ -204,7 +222,9 @@ async function main() {
       await landOrders(loc, r.body);
       if (!Array.isArray(r.body) || r.body.length < PAGE_SIZE) break;
     }
+    }
     for (const ep of ENDPOINTS) {
+      if (LEAN && !ep.params) continue; // static / config data is not needed for every backfilled day
       const p = ep.path.replace("{guid}", loc.guid);
       let token_ = null;
       for (let page = 1; ; page++) {
@@ -221,7 +241,7 @@ async function main() {
 
   {
     const get = makeClient(token, LOCATIONS[0].guid);
-    for (const ep of ORG_ENDPOINTS) {
+    for (const ep of LEAN ? [] : ORG_ENDPOINTS) {
       const params = ep.params ? ep.params() : {};
       const r = await get(ep.path, params);
       await save({ tenant: null, name: null, guid: null }, ep.path, params, 1, null, r);
@@ -238,6 +258,9 @@ async function main() {
     [runId, status, failures.length ? failures.slice(0, 50).join("\n") : null, stats.total, stats.ok, stats.failed, stats.orders]
   );
   console.log(`status=${status} calls=${stats.total} ok=${stats.ok} non2xx=${stats.failed} orders=${stats.orders}`);
+  // orders missing from this pull = the day is incomplete: exit non-zero so nightly.js retries it instead of building on a gap
+  const orderGaps = failures.filter((f) => /ordersBulk|not landed|halting|login/.test(f));
+  if (orderGaps.length) { console.error("ORDER PULL INCOMPLETE:\n" + orderGaps.slice(0, 10).join("\n")); process.exitCode = 2; }
   await pool.end();
 }
 main().catch((e) => { console.error("FAIL:", e.message); process.exit(1); });

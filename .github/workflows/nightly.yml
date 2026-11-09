@@ -1,18 +1,18 @@
-# Nightly Toast pipeline: pull -> input -> drv -> semantic -> output -> reconciliation -> reports.
-# Runs at 4:00 AM America/Chicago every day (all year).
+# Nightly Toast pipeline: pull -> input -> drv -> semantic -> output -> reconciliation -> prune -> reports.
 #
-# GitHub cron is UTC and cannot follow daylight saving, so two schedules are listed and the
-# "Only run at 4 AM Central" step lets exactly one of them continue:
-#   09:00 UTC = 4:00 AM CDT (summer)      10:00 UTC = 4:00 AM CST (winter)
+# GitHub starts scheduled runs late (often hours) and sometimes drops them, so this does NOT depend on the start time:
+#   - three slots a day, off the top of the hour (the busiest time on GitHub);
+#   - the first step (src/should_run.js) checks the database: if yesterday's business date (store time) is already loaded,
+#     the run skips itself; otherwise it does the work - no matter how late it started.
+#   09:17 UTC = 3:17 AM CST / 4:17 AM CDT      11:17 UTC and 13:17 UTC = fallbacks
+# Manual runs (Run workflow) always run.
 name: Nightly Toast pipeline
 
 on:
   schedule:
-    - cron: "0 9 * * *"
-    - cron: "0 10 * * *"
-    # TEMPORARY one-off slot: fires once on 5 Nov at 14:07 UTC (19:37 IST) and runs the REAL pipeline once, automatically,
-    # so the incremental load can be watched. REMOVE this line (and the matching gate exception) after the test.
-    - cron: "7 14 5 11 *"
+    - cron: "17 9 * * *"
+    - cron: "17 11 * * *"
+    - cron: "17 13 * * *"
   workflow_dispatch:
     inputs:
       date:
@@ -47,30 +47,24 @@ jobs:
       TOAST_GUID_SUGAR_LAND: ${{ secrets.TOAST_GUID_SUGAR_LAND }}
       REPORT_DIR: ${{ github.workspace }}/reports
     steps:
-      - name: Only run at 4 AM Central
-        id: gate
-        run: |
-          hour=$(TZ=America/Chicago date +%H)
-          echo "Chicago hour now: $hour (event: ${{ github.event_name }})"
-          # the one-off test slot (cron "7 14 5 11 *") is allowed through so the real pipeline runs once automatically
-          if [ "${{ github.event_name }}" = "schedule" ] && [ "${{ github.event.schedule }}" != "7 14 5 11 *" ] && [ "$hour" != "04" ]; then
-            echo "run=false" >> "$GITHUB_OUTPUT"; echo "Not 4 AM Central - skipping this schedule slot."
-          else
-            echo "run=true" >> "$GITHUB_OUTPUT"
-          fi
-
       - uses: actions/checkout@v4
-        if: steps.gate.outputs.run == 'true'
 
       - uses: actions/setup-node@v4
-        if: steps.gate.outputs.run == 'true'
         with:
           node-version: 22
           cache: npm
 
       - name: Install
-        if: steps.gate.outputs.run == 'true'
         run: npm ci
+
+      - name: Is yesterday already loaded?
+        id: gate
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            node src/should_run.js
+          else
+            echo "manual run - always runs"; echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Run nightly pipeline
         if: steps.gate.outputs.run == 'true'

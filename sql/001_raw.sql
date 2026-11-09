@@ -56,3 +56,11 @@ CREATE TABLE IF NOT EXISTS raw.toast_orders (
   fetched_at     timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS toast_orders_bd_idx ON raw.toast_orders(location_guid, business_date);
+
+-- Leaner storage (2026-11): config/menu snapshots stored only when they change (same_as_id points at the stored copy);
+-- order JSON in the API log is kept 30 days, then pruned (raw.toast_orders keeps the latest copy of every order forever).
+ALTER TABLE raw.api_responses ADD COLUMN IF NOT EXISTS payload_md5 text;
+ALTER TABLE raw.api_responses ADD COLUMN IF NOT EXISTS same_as_id bigint;
+ALTER TABLE raw.api_responses ADD COLUMN IF NOT EXISTS payload_pruned_at timestamptz;
+CREATE INDEX IF NOT EXISTS api_responses_snap_idx ON raw.api_responses(location_guid, endpoint, page_no, payload_md5) WHERE payload IS NOT NULL;
+CREATE INDEX IF NOT EXISTS toast_orders_fetched_idx ON raw.toast_orders(fetched_at);
