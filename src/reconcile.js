@@ -26,7 +26,8 @@ const day = `${DATE.slice(0, 4)}-${DATE.slice(4, 6)}-${DATE.slice(6, 8)}`;
   eq("orders: semantic = output", await one(`SELECT count(DISTINCT (store_location_id, order_id)) FROM sem.sem_order_header WHERE order_business_date=$1::int AND drv_order_counted=1`), await one(`SELECT coalesce(sum(order_count),0) FROM output.agg_order_daily WHERE business_date=$2::date`));
   eq("item gross: raw JSON = output", await one(`SELECT coalesce(sum((s->>'preDiscountPrice')::numeric),0) FROM raw.toast_orders o, jsonb_array_elements(o.payload->'checks') c, jsonb_array_elements(c->'selections') s
      WHERE o.business_date=$1::int AND coalesce((o.payload->>'voided')::bool,false)=false AND coalesce((c->>'voided')::bool,false)=false AND coalesce((s->>'voided')::bool,false)=false
-       -- items given the 'Waste' discount are not sales (drv WASTE_ITEM rule in schema/input-drv.yml)
+       -- not sales per drv COUNTABLE_ITEM (schema/input-drv.yml): deferred items (gift cards, app subscriptions) and 'Waste' items
+       AND coalesce((s->>'deferred')::bool,false)=false
        AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(coalesce(s->'appliedDiscounts','[]'::jsonb)) d WHERE d->>'name'='Waste')`),
      await one(`SELECT coalesce(sum(gross_amount),0) FROM output.agg_item_daily WHERE business_date=$2::date`));
   eq("gross sales: semantic = output", await one(`SELECT coalesce(sum(drv_gross_sales)+sum(drv_service_charge_total),0) FROM (SELECT DISTINCT ON (store_location_id, order_id) * FROM sem.sem_order_header WHERE order_business_date=$1::int ORDER BY store_location_id, order_id) x`), await one(`SELECT coalesce(sum(gross_sales)+sum(service_charge_amount),0) FROM output.agg_order_daily WHERE business_date=$2::date`));
