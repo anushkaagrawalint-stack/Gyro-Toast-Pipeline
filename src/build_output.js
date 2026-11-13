@@ -178,6 +178,71 @@ const STEPS = [
       coalesce(sum(i.modifier_price_before_discount) FILTER (WHERE i.drv_sales_status='WASTE'),0) AS waste_amount, ${RUN} AS run_id, ${ASOF} AS as_of_ts
     FROM sem.sem_order_items i WHERE i.row_type='modifier' GROUP BY 1,2,3,4,5`],
 
+  // Toast's Product Mix "All levels" per store and day (menu > menu group > subgroup > item > modifier / special request).
+  // Reads sem_order_items + the lookups: names come from the setup copy in force on the sale date (so a renamed item is one line),
+  // a group that has a parent is shown as subgroup under that parent, tags come from the tag lookups. Everything sits on the ORDER date.
+  // line_type: menuItem | openItem | modifier | specialRequest (a modifier with no modifier group). size_modifier is filled only for
+  // size groups (pricing mode REPLACES_PRICE) - Gyro has none.
+  ["agg_product_mix_daily", `CREATE TABLE output.agg_product_mix_daily AS
+    WITH itm AS (
+      SELECT i.tenant_id, i.store_location_id, ${D("i.order_business_date")} AS business_date,
+        CASE WHEN i.drv_is_open_item = 1 THEN 'openItem' ELSE 'menuItem' END AS line_type,
+        i.menu_name, i.menu_group_id, i.menu_group_name AS group_name_line, i.menu_item_id, i.menu_item_name AS item_name_line,
+        i.sales_category_id, i.sales_category_name AS cat_name_line, NULL::text AS size_modifier, NULL::text AS modifier_name,
+        sum(i.drv_countable_quantity) AS qty_sold, sum(i.drv_gross_sales) AS gross_amount, sum(i.drv_discount_incl_check_share) AS discount_amount,
+        sum(coalesce(i.items_refund_amount,0)) AS refund_amount,
+        coalesce(sum(i.item_price_after_discount) FILTER (WHERE i.drv_sales_status='VOIDED'),0) AS void_amount, sum(i.drv_countable_tax_amount) AS tax_amount,
+        coalesce(sum(i.item_quantity) FILTER (WHERE i.drv_sales_status='WASTE'),0) AS waste_qty,
+        coalesce(sum(i.item_price_before_discount) FILTER (WHERE i.drv_sales_status='WASTE'),0) AS waste_amount,
+        coalesce(sum(i.item_price_before_discount) FILTER (WHERE i.drv_sales_status='VOIDED'),0) AS voided_gross_amount,
+        coalesce(sum(i.item_quantity) FILTER (WHERE i.drv_sales_status='VOIDED'),0) AS voided_qty
+      FROM sem.sem_order_items i WHERE i.row_type='item' GROUP BY 1,2,3,4,5,6,7,8,9,10,11,12,13),
+    mdf AS (
+      SELECT m.tenant_id, m.store_location_id, ${D("m.order_business_date")} AS business_date,
+        CASE WHEN m.modifier_group_name IS NULL THEN 'specialRequest' ELSE 'modifier' END AS line_type,
+        p.menu_name, p.menu_group_id, p.menu_group_name AS group_name_line, p.menu_item_id, p.menu_item_name AS item_name_line,
+        m.sales_category_id, m.sales_category_name AS cat_name_line,
+        CASE WHEN m.modifier_group_pricing_mode = 'REPLACES_PRICE' THEN m.modifier_name END AS size_modifier,
+        CASE WHEN m.modifier_group_pricing_mode = 'REPLACES_PRICE' THEN NULL ELSE m.modifier_name END AS modifier_name,
+        coalesce(sum(m.modifier_quantity) FILTER (WHERE m.drv_sales_status='SOLD'),0) AS qty_sold,
+        coalesce(sum(m.modifier_price_before_discount) FILTER (WHERE m.drv_sales_status='SOLD'),0) AS gross_amount, 0::numeric AS discount_amount, 0::numeric AS refund_amount,
+        coalesce(sum(m.modifier_price_after_discount) FILTER (WHERE m.drv_sales_status='VOIDED'),0) AS void_amount, 0::numeric AS tax_amount,
+        coalesce(sum(m.modifier_quantity) FILTER (WHERE m.drv_sales_status='WASTE'),0) AS waste_qty,
+        coalesce(sum(m.modifier_price_before_discount) FILTER (WHERE m.drv_sales_status='WASTE'),0) AS waste_amount,
+        coalesce(sum(m.modifier_price_before_discount) FILTER (WHERE m.drv_sales_status='VOIDED'),0) AS voided_gross_amount,
+        coalesce(sum(m.modifier_quantity) FILTER (WHERE m.drv_sales_status='VOIDED'),0) AS voided_qty
+      FROM sem.sem_order_items m
+      LEFT JOIN (SELECT DISTINCT ON (store_location_id, item_id) store_location_id, item_id, menu_name, menu_group_id, menu_group_name, menu_item_id, menu_item_name
+                 FROM sem.sem_order_items WHERE row_type='item' ORDER BY store_location_id, item_id) p ON p.store_location_id = m.store_location_id AND p.item_id = m.item_id
+      WHERE m.row_type='modifier' GROUP BY 1,2,3,4,5,6,7,8,9,10,11,12,13),
+    u AS (SELECT * FROM itm UNION ALL SELECT * FROM mdf),
+    r AS (
+      SELECT u.tenant_id, u.store_location_id, u.business_date, u.line_type, u.menu_name,
+        coalesce(CASE WHEN g.parent_menu_group_id IS NOT NULL THEN g.parent_menu_group_name ELSE g.menu_group_name END, u.group_name_line) AS menu_group_name,
+        CASE WHEN g.parent_menu_group_id IS NOT NULL THEN g.menu_group_name END AS subgroup_name,
+        coalesce(mi.menu_item_name, u.item_name_line) AS item_name, u.size_modifier, u.modifier_name,
+        coalesce(sc.sales_category_name, u.cat_name_line, 'No Sales Category Assigned') AS sales_category_name,
+        CASE WHEN u.modifier_name IS NULL AND u.size_modifier IS NULL THEN it.item_tags ELSE ot.item_tags END AS item_tags,
+        u.qty_sold, u.gross_amount, u.discount_amount, u.refund_amount, u.void_amount, u.tax_amount, u.waste_qty, u.waste_amount, u.voided_gross_amount, u.voided_qty
+      FROM u
+      LEFT JOIN LATERAL (SELECT x.* FROM sem.sem_menu_group x WHERE x.store_location_id = u.store_location_id AND x.menu_group_id = u.menu_group_id
+          ORDER BY (x.copy_business_date <= u.business_date) DESC, CASE WHEN x.copy_business_date <= u.business_date THEN x.copy_business_date END DESC NULLS LAST, x.copy_business_date LIMIT 1) g ON true
+      LEFT JOIN sem.sem_menu_item mi ON mi.store_location_id = u.store_location_id AND mi.menu_item_id = u.menu_item_id
+      LEFT JOIN LATERAL (SELECT x.* FROM sem.sem_sales_category x WHERE x.store_location_id = u.store_location_id AND x.sales_category_id = u.sales_category_id
+          ORDER BY (x.copy_business_date <= u.business_date) DESC, CASE WHEN x.copy_business_date <= u.business_date THEN x.copy_business_date END DESC NULLS LAST, x.copy_business_date LIMIT 1) sc ON true
+      LEFT JOIN LATERAL (SELECT x.item_tags FROM sem.sem_menu_item_tag x WHERE x.store_location_id = u.store_location_id AND x.menu_item_id = u.menu_item_id
+          ORDER BY (x.copy_business_date <= u.business_date) DESC, CASE WHEN x.copy_business_date <= u.business_date THEN x.copy_business_date END DESC NULLS LAST, x.copy_business_date LIMIT 1) it ON true
+      LEFT JOIN LATERAL (SELECT x.item_tags FROM sem.sem_modifier_option_tag x WHERE x.store_location_id = u.store_location_id AND x.modifier_option_name = coalesce(u.modifier_name, u.size_modifier)
+          ORDER BY (x.copy_business_date <= u.business_date) DESC, CASE WHEN x.copy_business_date <= u.business_date THEN x.copy_business_date END DESC NULLS LAST, x.copy_business_date LIMIT 1) ot ON true)
+    SELECT tenant_id, store_location_id, business_date,
+      output.k(tenant_id, coalesce(line_type,'')||'|'||coalesce(menu_name,'')||'|'||coalesce(menu_group_name,'')||'|'||coalesce(subgroup_name,'')||'|'||coalesce(item_name,'')||'|'||coalesce(size_modifier,'')||'|'||coalesce(modifier_name,'')) AS line_key,
+      line_type, menu_name, menu_group_name, subgroup_name, item_name, size_modifier, modifier_name, sales_category_name, item_tags,
+      sum(qty_sold) AS qty_sold, sum(gross_amount) AS gross_amount, sum(discount_amount) AS discount_amount, sum(refund_amount) AS refund_amount, sum(void_amount) AS void_amount,
+      sum(gross_amount - discount_amount - refund_amount) AS net_amount, sum(tax_amount) AS tax_amount, sum(waste_qty) AS waste_qty, sum(waste_amount) AS waste_amount,
+      sum(voided_gross_amount) AS voided_gross_amount, sum(voided_qty) AS voided_qty, ${RUN} AS run_id, ${ASOF} AS as_of_ts
+    FROM r GROUP BY tenant_id, store_location_id, business_date, line_type, menu_name, menu_group_name, subgroup_name, item_name, size_modifier, modifier_name, sales_category_name, item_tags
+    HAVING sum(qty_sold) <> 0 OR sum(gross_amount) <> 0 OR sum(void_amount) <> 0 OR sum(voided_qty) <> 0 OR sum(waste_qty) <> 0`],
+
   ["agg_payment_daily", `CREATE TABLE output.agg_payment_daily AS
     WITH b AS (SELECT p.*,
         coalesce(p.payment_type,'')||'|'||coalesce(p.drv_payment_sub_type,'')||'|'||coalesce(p.card_type,'')||'|'||coalesce(p.payment_status,'') AS tcode
