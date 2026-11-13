@@ -39,18 +39,16 @@ const STEPS = [
   // ---------------------------------------------------------------- dimensions
   // fiscal calendar (4-4-5, Monday-start weeks) from schema/fiscal_calendar.csv
   ["fiscal_calendar", `CREATE TABLE output.fiscal_calendar AS SELECT * FROM (VALUES ${FISCAL_VALUES}) v(fiscal_year, period, start_date, end_date, quarter, days, weeks)`],
-  ["dim_date", `CREATE TABLE output.dim_date AS SELECT d::date AS business_date, to_char(d,'YYYYMMDD')::bigint AS date_int,
-      upper(to_char(d,'DY')) AS day_of_week_code, trim(to_char(d,'Day')) AS day_of_week_name, extract(isodow FROM d)::bigint AS day_of_week_number,
-      date_trunc('week', d)::date AS week_start_date, date_trunc('month', d)::date AS month_start_date, extract(quarter FROM d)::bigint AS quarter,
-      extract(year FROM d)::bigint AS year, (d - interval '364 days')::date AS same_weekday_last_year,
+  ["dim_date", `CREATE TABLE output.dim_date AS SELECT c.business_date, c.date_int, c.day_of_week_code, c.day_of_week_name, c.day_of_week_number,
+      c.week_start_date, c.month_start_date, c.quarter, c.year, c.same_weekday_last_year,
       f.fiscal_year::bigint AS fiscal_year, f.period::bigint AS fiscal_period, f.quarter::bigint AS fiscal_quarter,
-      CASE WHEN f.period IS NOT NULL THEN ((d::date - f.start_date) / 7 + 1)::bigint END AS fiscal_week,
-      CASE WHEN f.period IS NOT NULL THEN ((d::date - (SELECT min(start_date) FROM output.fiscal_calendar x WHERE x.fiscal_year = f.fiscal_year)) / 7 + 1)::bigint END AS fiscal_week_of_year,
+      CASE WHEN f.period IS NOT NULL THEN ((c.business_date - f.start_date) / 7 + 1)::bigint END AS fiscal_week,
+      CASE WHEN f.period IS NOT NULL THEN ((c.business_date - (SELECT min(start_date) FROM output.fiscal_calendar x WHERE x.fiscal_year = f.fiscal_year)) / 7 + 1)::bigint END AS fiscal_week_of_year,
       CASE WHEN f.period IS NOT NULL THEN 'P' || f.period END AS fiscal_period_label,
-      CASE WHEN f.period IS NOT NULL THEN 'P' || f.period || 'W' || ((d::date - f.start_date) / 7 + 1) END AS fiscal_week_label,
+      CASE WHEN f.period IS NOT NULL THEN 'P' || f.period || 'W' || ((c.business_date - f.start_date) / 7 + 1) END AS fiscal_week_label,
       f.start_date AS fiscal_period_start, f.end_date AS fiscal_period_end
-      FROM generate_series('2022-01-01'::date, '2028-12-31'::date, interval '1 day') d
-      LEFT JOIN output.fiscal_calendar f ON d::date BETWEEN f.start_date AND f.end_date`],
+      FROM sem.sem_calendar c
+      LEFT JOIN output.fiscal_calendar f ON c.business_date BETWEEN f.start_date AND f.end_date`],
   ["dim_hour", `CREATE TABLE output.dim_hour AS SELECT h::bigint AS order_hour, 'H'||lpad(h::text,2,'0') AS hour_code,
       CASE WHEN h=0 THEN '12 AM' WHEN h<12 THEN h||' AM' WHEN h=12 THEN '12 PM' ELSE (h-12)||' PM' END AS hour_label FROM generate_series(0,23) h`],
   ["dim_location", `CREATE TABLE output.dim_location AS SELECT ${K("a.tenant_id", "a.store_location_id")} AS location_key, a.tenant_id, a.store_location_id, a.store_name,

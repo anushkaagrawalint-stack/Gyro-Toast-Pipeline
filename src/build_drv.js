@@ -11,7 +11,7 @@ const DRV = yaml.load(fs.readFileSync(path.join(__dirname, "../schema/input-drv.
 const INSPEC = yaml.load(fs.readFileSync(path.join(__dirname, "../schema/raw-input.yaml"), "utf8"));
 
 const ORDER_T = ["order", "order_pricing_feature", "check", "service_charge", "items", "modifier", "payment", "tax", "discount", "discount_combo_item", "discount_trigger_item"];
-const inScope = (n) => ORDER_T.includes(n.replace(/^drv_/, "")) || /^drv_(config|menus|labor)/.test(n);
+const inScope = (n) => ORDER_T.includes(n.replace(/^drv_/, "")) || /^drv_(config|menus|labor)/.test(n) || n === "drv_location";
 const MODELS = DRV.models.filter((m) => inScope(m.name));
 
 const first = (n) => n.split("/")[0].trim();

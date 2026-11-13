@@ -12,7 +12,7 @@ const SPEC = yaml.load(fs.readFileSync(path.join(__dirname, "../schema/raw-input
 // ---- scope: orders, menus, config, labor ----------------------------------------------
 const ORDER_TABLES = ["in_order", "in_order_pricing_feature", "in_check", "in_service_charge", "in_items",
   "in_modifier", "in_payment", "in_tax", "in_discount", "in_discount_combo_item", "in_discount_trigger_item"];
-const inScope = (t) => ORDER_TABLES.includes(t) || /^in_(config|menus|labor)_/.test(t);
+const inScope = (t) => ORDER_TABLES.includes(t) || /^in_(config|menus|labor)_/.test(t) || t === "in_location"; // in_location: one row per store (feeds sem_location)
 const TABLES = Object.keys(SPEC).filter((k) => k.startsWith("in_") && inScope(k));
 
 // ---- entity -> SOR endpoint ------------------------------------------------------------
@@ -29,6 +29,7 @@ const ENTITY_EP = {
   discounts: "/config/v2/discounts", alternate_payment_types: "/config/v2/alternatePaymentTypes",
   time_entries: "/labor/v1/timeEntries", employees: "/labor/v1/employees", jobs: "/labor/v1/jobs",
   no_sale_reasons: null, // not available to these credentials -> table stays empty
+  restaurants: "/restaurants/v1/restaurants/{guid}", // one record per store (feeds in_location -> drv_location -> sem_location)
 };
 const entityOf = (spec) => (spec.source_entity === null ? "menus_cfg" : spec.source_entity);
 ENTITY_EP.menus_cfg = "/config/v2/menus"; // in_config_menu* have source_entity null: config.menus
@@ -224,8 +225,9 @@ async function main() {
     for (const r of resp) (byEp[r.endpoint] ||= []).push(r);
     for (const t of TABLES) {
       if (ORDER_TABLES.includes(t)) continue;
-      const ep = ENTITY_EP[entityOf(SPEC[t])];
-      if (!ep) continue;
+      const ep0 = ENTITY_EP[entityOf(SPEC[t])];
+      if (!ep0) continue;
+      const ep = ep0.replace("{guid}", l.location_guid); // per-store endpoints carry the store's own guid
       const pages = (byEp[ep] || []).filter((p) => p.http_status >= 200 && p.http_status < 300 && p.payload !== null);
       if (!pages.length) continue;
       if (scopeOf(t, SPEC[t]) === "store") (scope.store[t] ||= []).push(l.location_name);

@@ -1,0 +1,70 @@
+# Semantic lookups for Toast's Product Mix report (Output agg_product_mix_daily, which reads the item and
+# modifier rows of sem_order_items; Neon
+# analytics_out.agg_product_mix_daily and its per-sheet functions, migration 009).
+# Copies of Derived like the other Semantic tables; the contract (dbt_project.yml) holds every
+# column's name, type and order.
+
+version: 2
+models:
+- name: sem_menu_item_tag
+  description: One row per store, tagged menu item and menu copy, with the item's tags as Toast shows them (sorted, comma separated). Every copy is kept; the Product Mix uses the copy in force on the sale's date.
+  meta:
+    grain: store, menu item, menu copy
+    built_from: [drv_menus_menu_item_tag]
+  data_tests:
+  - dbt_utils.unique_combination_of_columns:
+      combination_of_columns: [tenant_id, store_location_id, menu_item_id, copy_business_date]
+  columns:
+  - {name: tenant_id, data_type: STRING, description: The tenant (customer)., data_tests: [not_null]}
+  - {name: store_location_id, data_type: STRING, description: The store., data_tests: [not_null]}
+  - {name: menu_item_id, data_type: STRING, description: The menu item's id., data_tests: [not_null]}
+  - {name: copy_business_date, data_type: DATE, description: Day of the menu copy the tags come from., data_tests: [not_null]}
+  - {name: item_tags, data_type: STRING, description: "The item's tags in that copy, e.g. 'Gluten-free, New!, Vegetarian'."}
+
+- name: sem_menu_group
+  description: One row per store, menu group and menu copy, with its menu, name and parent group (when a subgroup). Every copy is kept; the Product Mix uses the copy in force on the sale's date.
+  meta:
+    grain: store, menu group, menu copy
+    built_from: [drv_menus_menu_groups]
+  data_tests:
+  - dbt_utils.unique_combination_of_columns:
+      combination_of_columns: [tenant_id, store_location_id, menu_group_id, copy_business_date]
+  columns:
+  - {name: tenant_id, data_type: STRING, description: The tenant (customer)., data_tests: [not_null]}
+  - {name: store_location_id, data_type: STRING, description: The store., data_tests: [not_null]}
+  - {name: menu_group_id, data_type: STRING, description: The menu group's id., data_tests: [not_null]}
+  - {name: copy_business_date, data_type: DATE, description: Day of the menu copy., data_tests: [not_null]}
+  - {name: menu_name, data_type: STRING, description: The menu the group is on in that copy.}
+  - {name: menu_group_name, data_type: STRING, description: The menu group's name in that copy.}
+  - {name: parent_menu_group_id, data_type: STRING, description: The parent group's id when this group is a subgroup.}
+  - {name: parent_menu_group_name, data_type: STRING, description: The parent group's name when this group is a subgroup.}
+
+- name: sem_sales_category
+  description: One row per store, sales category and setup copy. Every copy is kept; the Product Mix uses the copy in force on the sale's date.
+  meta:
+    grain: store, sales category, setup copy
+    built_from: [drv_config_sales_category]
+  data_tests:
+  - dbt_utils.unique_combination_of_columns:
+      combination_of_columns: [tenant_id, store_location_id, sales_category_id, copy_business_date]
+  columns:
+  - {name: tenant_id, data_type: STRING, description: The tenant (customer)., data_tests: [not_null]}
+  - {name: store_location_id, data_type: STRING, description: The store., data_tests: [not_null]}
+  - {name: sales_category_id, data_type: STRING, description: The sales category's id., data_tests: [not_null]}
+  - {name: copy_business_date, data_type: DATE, description: Day of the setup copy., data_tests: [not_null]}
+  - {name: sales_category_name, data_type: STRING, description: The sales category's name in that copy.}
+
+- name: sem_modifier_option_tag
+  description: One row per store, tagged modifier option (by name) and menu copy, with the option's tags as Toast shows them.
+  meta:
+    grain: store, modifier option name, menu copy
+    built_from: [drv_menus_modifier_option_tag, drv_config_modifier_option]
+  data_tests:
+  - dbt_utils.unique_combination_of_columns:
+      combination_of_columns: [tenant_id, store_location_id, modifier_option_name, copy_business_date]
+  columns:
+  - {name: tenant_id, data_type: STRING, description: The tenant (customer)., data_tests: [not_null]}
+  - {name: store_location_id, data_type: STRING, description: The store., data_tests: [not_null]}
+  - {name: modifier_option_name, data_type: STRING, description: The modifier option's name., data_tests: [not_null]}
+  - {name: copy_business_date, data_type: DATE, description: Day of the menu copy., data_tests: [not_null]}
+  - {name: item_tags, data_type: STRING, description: "The option's tags in that copy, e.g. 'Gluten-free'."}
