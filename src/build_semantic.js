@@ -30,14 +30,20 @@ async function main() {
   const lw = (await pool.query("SELECT min(nullif(labor_business_date::text,'')::int) lo, max(nullif(labor_business_date::text,'')::int) hi FROM drv.drv_labor WHERE drv_record_type='shift'")).rows[0];
   console.log(`sem window: orders ${ow.lo}..${ow.hi}, labor ${lw.lo}..${lw.hi}`);
   const exists = async (t) => (await pool.query("SELECT to_regclass($1) r", ["sem." + t])).rows[0].r !== null;
-  async function place(t, selectSql, dateExpr, w) {
+  // m = the model from semantic.yml. A table that already exists (production keeps full history) gets any column the
+  // definition has added since (ALTER ... ADD COLUMN, NULL for old rows until they are rebuilt), and rows are inserted
+  // by column NAME, so the column order of an older table never matters.
+  async function place(t, selectSql, dateExpr, w, m) {
     if (!(await exists(t))) { await pool.query(`CREATE TABLE sem.${t} AS ${selectSql}`); return; }
+    const have = new Set((await pool.query("SELECT column_name FROM information_schema.columns WHERE table_schema='sem' AND table_name=$1", [t])).rows.map((r) => r.column_name));
+    for (const c of m.columns) if (!have.has(c.name)) { await pool.query(`ALTER TABLE sem.${t} ADD COLUMN ${q(c.name)} ${pgType(c.data_type)}`); console.log(`sem.${t}: added column ${c.name}`); }
     if (w.lo === null) return;
+    const names = m.columns.map((c) => q(c.name)).join(", ");
     const c = await pool.connect();
     try {
       await c.query("BEGIN");
       await c.query(`DELETE FROM sem.${t} WHERE ${dateExpr} BETWEEN $1 AND $2`, [w.lo, w.hi]);
-      await c.query(`INSERT INTO sem.${t} SELECT * FROM (${selectSql}) x`);
+      await c.query(`INSERT INTO sem.${t} (${names}) SELECT ${names} FROM (${selectSql}) x`);
       await c.query("COMMIT");
     } catch (e) { await c.query("ROLLBACK"); throw new Error(`${t}: ${e.message}`); } finally { c.release(); }
   }
@@ -50,7 +56,7 @@ async function main() {
     await place("sem_order_header", `SELECT ${sel.join(", ")}
       FROM drv.drv_order o
       LEFT JOIN drv.drv_check c ON c.store_location_id=o.store_location_id AND c.order_id=o.order_id AND c.check_sequence='0'
-      LEFT JOIN drv.drv_service_charge s ON s.store_location_id=o.store_location_id AND s.order_id=o.order_id`, "order_business_date", ow);
+      LEFT JOIN drv.drv_service_charge s ON s.store_location_id=o.store_location_id AND s.order_id=o.order_id`, "order_business_date", ow, m);
   }
 
   // ---------- sem_order_items (union of 5 row types) ----------
@@ -72,16 +78,21 @@ async function main() {
         LEFT JOIN drv.drv_order jo ON jo.store_location_id=b.store_location_id AND jo.order_id=b.order_id
         LEFT JOIN drv.drv_items ji ON ji.store_location_id=b.store_location_id AND ji.item_id=b.item_id`);
     }
-    await place("sem_order_items", parts.join(" UNION ALL "), "order_business_date", ow);
+    await place("sem_order_items", parts.join(" UNION ALL "), "order_business_date", ow, m);
   }
 
   // ---------- sem_order_payments ----------
   {
     const m = model("sem_order_payments");
     const A = { drv_payment: "p", drv_order: "o" };
-    const sel = m.columns.map((c) => `${col(A[c.meta.source_table], c.meta.source_table, c.meta.source_column, pgType(c.data_type), m.name)} AS ${q(c.name)}`);
+    const sel = m.columns.map((c) => {
+      // definition says "hour in store_timezone": the hour of day (0-23) of the source timestamp, store local time
+      if (/hour in store_timezone/i.test(c.meta.how || ""))
+        return `extract(hour FROM (${A[c.meta.source_table]}.${q(c.meta.source_column)} AT TIME ZONE ${A[c.meta.source_table]}."store_timezone"))::${pgType(c.data_type)} AS ${q(c.name)}`;
+      return `${col(A[c.meta.source_table], c.meta.source_table, c.meta.source_column, pgType(c.data_type), m.name)} AS ${q(c.name)}`;
+    });
     await place("sem_order_payments", `SELECT ${sel.join(", ")} FROM drv.drv_payment p
-      LEFT JOIN drv.drv_order o ON o.store_location_id=p.store_location_id AND o.order_id=p.order_id`, "order_business_date", ow);
+      LEFT JOIN drv.drv_order o ON o.store_location_id=p.store_location_id AND o.order_id=p.order_id`, "order_business_date", ow, m);
   }
 
   // ---------- sem_labor (shift rows, one per store + time entry; shift_id is empty for unscheduled clock-ins) ----------
@@ -89,7 +100,7 @@ async function main() {
     const m = model("sem_labor");
     const sel = m.columns.map((c) => `${col("l", "drv_labor", c.meta.source_column, pgType(c.data_type), m.name)} AS ${q(c.name)}`);
     await place("sem_labor", `SELECT DISTINCT ON (l.store_location_id, l.time_entry_id) ${sel.join(", ")}
-      FROM drv.drv_labor l WHERE l.drv_record_type='shift' ORDER BY l.store_location_id, l.time_entry_id`, "nullif(labor_business_date::text,'')::int", lw);
+      FROM drv.drv_labor l WHERE l.drv_record_type='shift' ORDER BY l.store_location_id, l.time_entry_id`, "nullif(labor_business_date::text,'')::int", lw, m);
   }
 
   // indexes for the dashboard and the windowed deletes

@@ -1774,6 +1774,77 @@ models:
           source_table: drv_modifier
           source_column: drv_sales_status
           how: own row
+  - name: modifier_id
+    description: 'Modifier rows: the modifier line''s own id (item_id on a modifier row is the item it belongs to).'
+    data_type: STRING
+    meta:
+      source_by_row_type:
+        modifier:
+          source_table: drv_modifier
+          source_column: modifier_id
+          how: own row
+  - name: menu_item_id
+    description: 'Item rows: the menu item''s id. Joins sem_menu_item for the item''s current name (reports across renames).'
+    data_type: STRING
+    meta:
+      source_by_row_type:
+        item:
+          source_table: drv_items
+          source_column: menu_item_id
+          how: own row
+  - name: menu_group_id
+    description: The menu group's id. Joins sem_menu_group for the menu, group and parent group as Toast names them today.
+    data_type: STRING
+    meta:
+      source_by_row_type:
+        item:
+          source_table: drv_items
+          source_column: menu_group_id
+          how: own row
+        modifier:
+          source_table: drv_modifier
+          source_column: menu_group_id
+          how: own row
+  - name: sales_category_id
+    description: The sales category's id. Joins sem_sales_category for the category as Toast names it today.
+    data_type: STRING
+    meta:
+      source_by_row_type:
+        item:
+          source_table: drv_items
+          source_column: sales_category_id
+          how: own row
+        modifier:
+          source_table: drv_modifier
+          source_column: sales_category_id
+          how: own row
+  - name: modifier_group_pricing_mode
+    description: 'Modifier rows: how the modifier group prices the item. REPLACES_PRICE = a size group (Toast''s Product Mix "Size modifier").'
+    data_type: STRING
+    meta:
+      source_by_row_type:
+        modifier:
+          source_table: drv_modifier
+          source_column: modifier_group_pricing_mode
+          how: own row
+  - name: item_price_after_discount
+    description: 'Item rows: the line''s price after its discounts. On a voided line this is Toast''s Product Mix "Void amt".'
+    data_type: NUMERIC
+    meta:
+      source_by_row_type:
+        item:
+          source_table: drv_items
+          source_column: item_unit_price
+          how: own row
+  - name: modifier_price_after_discount
+    description: 'Modifier rows: the modifier''s price after discounts. On a voided line this is Toast''s Product Mix "Void amt".'
+    data_type: NUMERIC
+    meta:
+      source_by_row_type:
+        modifier:
+          source_table: drv_modifier
+          source_column: modifier_unit_price
+          how: own row
 - name: sem_order_payments
   description: One row per payment (drv_payment).
   meta:
@@ -2197,6 +2268,13 @@ models:
       source_table: drv_payment
       source_column: drv_paid_in_advance_amount
       how: own row
+  - name: drv_hour_refunded_at
+    description: The hour of the day (0-23, store local time) the refund was issued. Toast's hour-of-day report puts a refund in this hour, not in the hour the order was opened.
+    data_type: INT64
+    meta:
+      source_table: drv_payment
+      source_column: payment_refund_at
+      how: own row, hour in store_timezone
 - name: sem_labor
   description: 'One row per shift: drv_labor rows with drv_record_type = ''shift'', a shift repeated per break kept once.'
   meta:
